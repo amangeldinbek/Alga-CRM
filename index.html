@@ -324,7 +324,30 @@
 </style>
 </head>
 <body>
-<div id="app">
+
+<div class="modal-overlay hidden" id="loginScreen" style="z-index:9999;">
+  <div class="modal" style="max-width:380px;">
+    <div class="modal-head">
+      <h2>Вход в CRM</h2>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Email</label>
+        <input type="email" id="loginEmail" autocomplete="username" placeholder="you@example.com">
+      </div>
+      <div class="field">
+        <label>Пароль</label>
+        <input type="password" id="loginPassword" autocomplete="current-password">
+      </div>
+      <div id="loginError" style="color:var(--stop);font-size:13px;min-height:18px;"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-primary" id="loginBtn" style="width:100%;">Войти</button>
+    </div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
 
   <header class="topbar">
     <div class="brand">
@@ -348,6 +371,7 @@
       Загрузить новые данные
     </button>
     <button class="btn-folder" id="folderStatusBtn">Подключить папку</button>
+    <button class="btn-ghost" id="signOutBtn" style="padding:9px 14px;font-size:13px;" title="Выйти из аккаунта"></button>
   </header>
 
   <nav class="tabs" id="tabsNav">
@@ -462,11 +486,73 @@ const SEED = {
    Everyone who opens this exact file reads and writes the SAME shared data. */
 const FIREBASE_URL = "https://crm-alga-yapartner-default-rtdb.asia-southeast1.firebasedatabase.app"; // <- paste your Database URL here, e.g. https://alga-crm-default-rtdb.firebaseio.com
 const FIREBASE_CONFIGURED = !!FIREBASE_URL && !FIREBASE_URL.startsWith("__");
+const FIREBASE_API_KEY = "AIzaSyA4kcAn6hCly1cWNiuDgm6BvA5wMyZM2hw"; // <- paste your Web API Key here (Firebase Console → Project settings → General)
+const AUTH_CONFIGURED = !!FIREBASE_API_KEY && !FIREBASE_API_KEY.startsWith("__");
+const ADMIN_EMAIL = "amangeldinbek@gmail.com"; // only this account can reset park data
+
+let AUTH_ID_TOKEN = null, AUTH_REFRESH_TOKEN = null, AUTH_EMAIL = null, AUTH_EXPIRES_AT = 0;
+
+function saveSessionToStorage(){
+  try{
+    localStorage.setItem("crmAuthSession", JSON.stringify({
+      idToken: AUTH_ID_TOKEN, refreshToken: AUTH_REFRESH_TOKEN, email: AUTH_EMAIL, expiresAt: AUTH_EXPIRES_AT
+    }));
+  }catch(e){}
+}
+function loadSessionFromStorage(){
+  try{
+    const raw = localStorage.getItem("crmAuthSession");
+    if(!raw) return false;
+    const s = JSON.parse(raw);
+    if(!s.idToken || !s.refreshToken) return false;
+    AUTH_ID_TOKEN = s.idToken; AUTH_REFRESH_TOKEN = s.refreshToken; AUTH_EMAIL = s.email; AUTH_EXPIRES_AT = s.expiresAt || 0;
+    return true;
+  }catch(e){ return false; }
+}
+function clearSession(){
+  AUTH_ID_TOKEN = null; AUTH_REFRESH_TOKEN = null; AUTH_EMAIL = null; AUTH_EXPIRES_AT = 0;
+  try{ localStorage.removeItem("crmAuthSession"); }catch(e){}
+}
+
+async function signInWithPassword(email, password){
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`, {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({email, password, returnSecureToken: true})
+  });
+  const data = await res.json();
+  if(!res.ok) return {error: (data.error && data.error.message) || "Не удалось войти."};
+  AUTH_ID_TOKEN = data.idToken; AUTH_REFRESH_TOKEN = data.refreshToken; AUTH_EMAIL = data.email;
+  AUTH_EXPIRES_AT = Date.now() + (parseInt(data.expiresIn,10)||3600)*1000;
+  saveSessionToStorage();
+  return {ok:true};
+}
+async function refreshIdTokenIfNeeded(){
+  if(!AUTH_REFRESH_TOKEN) return false;
+  if(Date.now() < AUTH_EXPIRES_AT - 60000) return true; // still valid for >1 min
+  try{
+    const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`, {
+      method: "POST", headers: {"Content-Type":"application/x-www-form-urlencoded"},
+      body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(AUTH_REFRESH_TOKEN)}`
+    });
+    const data = await res.json();
+    if(!res.ok) return false;
+    AUTH_ID_TOKEN = data.id_token; AUTH_REFRESH_TOKEN = data.refresh_token;
+    AUTH_EXPIRES_AT = Date.now() + (parseInt(data.expires_in,10)||3600)*1000;
+    saveSessionToStorage();
+    return true;
+  }catch(e){ return false; }
+}
+function signOut(){
+  clearSession();
+  location.reload();
+}
 
 async function storeGet(key, fallback){
   if(!FIREBASE_CONFIGURED) return fallback;
   try{
-    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json`);
+    if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
+    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?access_token=${AUTH_ID_TOKEN}` : "";
+    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`);
     if(!res.ok) return fallback;
     const data = await res.json();
     return (data === null || data === undefined) ? fallback : data;
@@ -478,7 +564,9 @@ async function storeGet(key, fallback){
 async function storeSet(key, value){
   if(!FIREBASE_CONFIGURED) return;
   try{
-    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json`, {
+    if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
+    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?access_token=${AUTH_ID_TOKEN}` : "";
+    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {
       method: "PUT",
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify(value)
@@ -489,7 +577,11 @@ async function storeSet(key, value){
 }
 async function storeDelete(key){
   if(!FIREBASE_CONFIGURED) return;
-  try{ await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json`, {method:"DELETE"}); }catch(e){}
+  try{
+    if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
+    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?access_token=${AUTH_ID_TOKEN}` : "";
+    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {method:"DELETE"});
+  }catch(e){}
 }
 
 /* ---------------- Folder handle persistence (raw IndexedDB — window.storage is JSON-only) ---------------- */
@@ -721,6 +813,10 @@ async function resetCallStat(dayKey, staffName){
 }
 function callStatsTotalsForDay(dayKey){
   return Object.values(CALL_STATS||{}).filter(c=>c.dayKey===dayKey)
+    .reduce((acc,c)=>({called: acc.called+(c.called||0), agreed: acc.agreed+(c.agreed||0)}), {called:0, agreed:0});
+}
+function callStatsTotalsAllTime(){
+  return Object.values(CALL_STATS||{})
     .reduce((acc,c)=>({called: acc.called+(c.called||0), agreed: acc.agreed+(c.agreed||0)}), {called:0, agreed:0});
 }
 
@@ -993,11 +1089,12 @@ function renderTopbar(){
   const s = globalStats();
   const last = latestSnapshotDate();
   const stagnantCount = stagnantDrivers().length;
+  const parkDisplayName = isVozvrat ? "Возврат" : ACTIVE_PARK;
   document.getElementById("brandEyebrow").textContent = SHOWING_DUPLICATES ? "Дубли водителей" : (isVozvrat ? "Отдел Возврата" : "Отдел Удержания");
   document.getElementById("brandTitle").textContent = SHOWING_DUPLICATES ? "CRM — Дубли между парками" : (isVozvrat ? "CRM — Возврат водителей" : "CRM — Поехали / Не поехали");
   document.getElementById("lastSyncLabel").textContent = SHOWING_DUPLICATES
     ? "Поиск по всем паркам и Возврату · по В/У и точному ФИО"
-    : (last ? `${ACTIVE_PARK} · последняя сверка: ${fmtDMYHM(last)} · данные общие для всех, у кого есть ссылка` : `${ACTIVE_PARK} · данных пока нет`);
+    : (last ? `${parkDisplayName} · последняя сверка: ${fmtDMYHM(last)} · данные общие для всех, у кого есть ссылка` : `${parkDisplayName} · данных пока нет`);
   const row = document.getElementById("statRow");
 
   if(SHOWING_DUPLICATES){
@@ -1011,10 +1108,18 @@ function renderTopbar(){
       <div class="stat-pill go"><div class="num">${activeClusters.length}</div><div class="lbl">Активных</div></div>
       <div class="stat-pill stop"><div class="num">${inactiveCount}</div><div class="lbl">Не активных</div></div>
     `;
+  } else if(isVozvrat){
+    const callTotals = callStatsTotalsAllTime();
+    row.innerHTML = `
+      <div class="stat-pill"><div class="num">${callTotals.called}</div><div class="lbl">Обзвонено (всего)</div></div>
+      <div class="stat-pill go"><div class="num">${callTotals.agreed}</div><div class="lbl">Согласились (обзвон)</div></div>
+      <div class="stat-pill"><div class="num">${s.total}</div><div class="lbl">Добавлено по ID</div></div>
+      <div class="stat-pill go"><div class="num">${s.go}</div><div class="lbl">Вернувшиеся</div></div>
+    `;
   } else {
-  const totalLabel = isVozvrat ? "Согласившиеся" : "Всего";
-  const goLabel = isVozvrat ? "Вернувшиеся" : "Поехали";
-  const stopLabel = isVozvrat ? "Ожидают выезда" : "Не поехали";
+  const totalLabel = "Всего";
+  const goLabel = "Поехали";
+  const stopLabel = "Не поехали";
   row.innerHTML = `
     <div class="stat-pill"><div class="num">${s.total}</div><div class="lbl">${totalLabel}</div></div>
     <div class="stat-pill go"><div class="num">${s.go}</div><div class="lbl">${goLabel}</div></div>
@@ -2881,6 +2986,10 @@ function attachViewHandlers(){
 document.querySelectorAll(".tab-btn[data-tab]").forEach(btn=>{
   btn.addEventListener("click", ()=>{
     if(btn.dataset.tab === "reset"){
+      if(AUTH_EMAIL !== ADMIN_EMAIL){
+        showToast("Сброс данных разрешён только администратору.", 5000);
+        return;
+      }
       if(confirm(`Данные общие для всех, у кого есть ссылка. Удалить данные CRM для парка ${ACTIVE_PARK} (водителей, снимки, лог) для ВСЕХ пользователей и загрузить их заново из первичной выгрузки? Это действие необратимо.`)){
         (async ()=>{
           await storeDelete(`drivers:${ACTIVE_PARK}`); await storeDelete(`snapshots:${ACTIVE_PARK}`); await storeDelete(`log:${ACTIVE_PARK}`);
@@ -3270,20 +3379,75 @@ document.getElementById("dayModalBody").addEventListener("click", async (e)=>{
   }
 });
 
+function showApp(){
+  document.getElementById("app").classList.remove("hidden");
+  document.getElementById("loginScreen").classList.add("hidden");
+  const soBtn = document.getElementById("signOutBtn");
+  if(soBtn){
+    soBtn.textContent = AUTH_EMAIL ? `Выйти (${AUTH_EMAIL})` : "";
+    soBtn.style.display = AUTH_CONFIGURED ? "" : "none";
+    soBtn.onclick = signOut;
+  }
+}
+
+async function bootApp(){
+  await loadStaffRates();
+  await loadCallStats();
+  await loadCallRegistry();
+  await loadPark(ACTIVE_PARK);
+  initFolder();
+}
+
+function wireLoginForm(){
+  const btn = document.getElementById("loginBtn");
+  const errBox = document.getElementById("loginError");
+  const doLogin = async ()=>{
+    const email = document.getElementById("loginEmail").value.trim();
+    const password = document.getElementById("loginPassword").value;
+    if(!email || !password){ errBox.textContent = "Заполните email и пароль."; return; }
+    btn.disabled = true; btn.textContent = "Входим...";
+    const res = await signInWithPassword(email, password);
+    btn.disabled = false; btn.textContent = "Войти";
+    if(res.error){ errBox.textContent = res.error; return; }
+    errBox.textContent = "";
+    showApp();
+    await bootApp();
+  };
+  btn.onclick = doLogin;
+  document.getElementById("loginPassword").addEventListener("keydown", (e)=>{ if(e.key === "Enter") doLogin(); });
+  document.getElementById("loginEmail").addEventListener("keydown", (e)=>{ if(e.key === "Enter") doLogin(); });
+}
+
 if(!FIREBASE_CONFIGURED){
+  document.getElementById("app").classList.remove("hidden");
   document.getElementById("app").innerHTML = `
     <div style="max-width:520px;margin:60px auto;padding:28px 26px;background:#fff;border:1px solid var(--border);border-radius:16px;font-family:'IBM Plex Sans',sans-serif;">
       <h2 style="font-family:'Space Grotesk',sans-serif;margin:0 0 12px;">Хранилище ещё не настроено</h2>
       <p style="color:var(--muted);line-height:1.5;">В код не вставлен URL базы Firebase — без него данные не будут ни сохраняться, ни быть общими. Откройте файл в текстовом редакторе, найдите строку <code>const FIREBASE_URL = "https://crm-alga-yapartner-default-rtdb.asia-southeast1.firebasedatabase.app";</code> и замените плейсхолдер на ваш реальный Database URL (вида <code>https://ваш-проект-default-rtdb.firebaseio.com</code>), затем сохраните файл заново.</p>
     </div>`;
+} else if(!AUTH_CONFIGURED){
+  document.getElementById("app").classList.remove("hidden");
+  document.getElementById("app").innerHTML = `
+    <div style="max-width:520px;margin:60px auto;padding:28px 26px;background:#fff;border:1px solid var(--border);border-radius:16px;font-family:'IBM Plex Sans',sans-serif;">
+      <h2 style="font-family:'Space Grotesk',sans-serif;margin:0 0 12px;">Вход ещё не настроен</h2>
+      <p style="color:var(--muted);line-height:1.5;">В код не вставлен Web API Key Firebase — без него не заработает вход по email/паролю. Откройте файл в текстовом редакторе, найдите строку <code>const FIREBASE_API_KEY = "__FIREBASE_API_KEY__";</code> и замените плейсхолдер на ваш реальный Web API Key (Firebase Console → Project settings → General → Web API Key), затем сохраните файл заново.</p>
+    </div>`;
 } else {
-  (async ()=>{
-    await loadStaffRates();
-    await loadCallStats();
-    await loadCallRegistry();
-    await loadPark(ACTIVE_PARK);
-    initFolder();
-  })();
+  wireLoginForm();
+  if(loadSessionFromStorage()){
+    (async ()=>{
+      const ok = await refreshIdTokenIfNeeded();
+      if(ok){
+        showApp();
+        await bootApp();
+      } else {
+        clearSession();
+        document.getElementById("loginScreen").classList.remove("hidden");
+      }
+    })();
+  } else {
+    document.getElementById("loginScreen").classList.remove("hidden");
+  }
 }
 
 })();
