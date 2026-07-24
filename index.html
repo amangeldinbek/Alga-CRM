@@ -1357,17 +1357,31 @@ function openDayModal(dayKey){
 
   const dayCallEntries = Object.values(CALL_STATS||{}).filter(c=>c.dayKey===dayKey);
   const callTotals = callTotalsEarly;
-  const callStatsRows = dayCallEntries.length ? dayCallEntries.map(c=>`<tr>
-      <td data-label="Сотрудник">${escapeHTML(c.staffName)}</td>
-      <td class="mono" data-label="Обзвонено">${c.called}</td>
-      <td class="mono" data-label="Согласились">${c.agreed}</td>
-      <td data-label=""><button class="btn-ghost day-call-reset-btn" data-day="${dayKey}" data-staff="${escapeHTML(c.staffName)}" style="padding:3px 10px;font-size:11px;color:var(--stop);">Обнулить</button></td>
-    </tr>`).join("") + `<tr style="font-weight:600;">
+  const idsByStaffForDay = {};
+  cohort.forEach(d=>{
+    const name = d.responsible || "—";
+    idsByStaffForDay[name] = (idsByStaffForDay[name]||0) + 1;
+  });
+  const callByStaff = {};
+  dayCallEntries.forEach(c=>{ callByStaff[c.staffName] = c; });
+  const allStaffForDay = Array.from(new Set([...Object.keys(callByStaff), ...Object.keys(idsByStaffForDay)])).sort();
+  const totalIdsAdded = Object.values(idsByStaffForDay).reduce((s,n)=>s+n, 0);
+  const callStatsRows = allStaffForDay.length ? allStaffForDay.map(name=>{
+    const c = callByStaff[name];
+    return `<tr>
+      <td data-label="Сотрудник">${escapeHTML(name)}</td>
+      <td class="mono" data-label="Обзвонено">${c ? c.called : "—"}</td>
+      <td class="mono" data-label="Согласились">${c ? c.agreed : "—"}</td>
+      <td class="mono" data-label="Добавлено ID">${idsByStaffForDay[name] || 0}</td>
+      <td data-label="">${c ? `<button class="btn-ghost day-call-reset-btn" data-day="${dayKey}" data-staff="${escapeHTML(name)}" style="padding:3px 10px;font-size:11px;color:var(--stop);">Обнулить</button>` : ""}</td>
+    </tr>`;
+  }).join("") + `<tr style="font-weight:600;">
       <td data-label="Итого">Итого</td>
       <td class="mono" data-label="Обзвонено">${callTotals.called}</td>
       <td class="mono" data-label="Согласились">${callTotals.agreed}</td>
+      <td class="mono" data-label="Добавлено ID">${totalIdsAdded}</td>
       <td></td>
-    </tr>` : `<tr><td colspan="4" class="muted-sm" style="padding:8px;">Пока никто не отчитался за этот день</td></tr>`;
+    </tr>` : `<tr><td colspan="5" class="muted-sm" style="padding:8px;">Пока никто не отчитался за этот день</td></tr>`;
 
   const vozvratForms = isVozvrat ? `
     <div class="section-title">Добавить водителей за этот день</div>
@@ -1388,7 +1402,7 @@ function openDayModal(dayKey){
       <button class="btn-primary" id="dayCallSaveBtn" data-day="${dayKey}" style="padding:9px 16px;">Сохранить</button>
     </div>
     <table class="mini-table" style="margin-bottom:20px;">
-      <thead><tr><th>Сотрудник</th><th>Обзвонено</th><th>Согласились</th><th></th></tr></thead>
+      <thead><tr><th>Сотрудник</th><th>Обзвонено</th><th>Согласились</th><th>Добавлено ID</th><th></th></tr></thead>
       <tbody>${callStatsRows}</tbody>
     </table>
   ` : "";
@@ -1584,9 +1598,11 @@ function stagnantHTML(){
 /* ---------------- Staff tab (Отдел Возврата — bonus rates) ---------------- */
 function staffHTML(){
   const staffNames = Object.keys(STAFF_RATES).sort();
+  const addedCountFor = name => Object.values(DRIVERS).filter(d=>d.responsible===name).length;
   const rows = staffNames.map(name=>`<tr>
       <td data-label="Сотрудник">${escapeHTML(name)}</td>
       <td class="mono" data-label="Ставка за водителя">${fmtMoney(STAFF_RATES[name])} тг</td>
+      <td class="mono" data-label="Добавлено ID">${addedCountFor(name)}</td>
       <td data-label="">
         <button class="btn-ghost staff-edit-btn" data-staff="${escapeHTML(name)}" style="padding:5px 12px;font-size:12px;">изменить</button>
         <button class="btn-ghost staff-delete-btn" data-staff="${escapeHTML(name)}" style="padding:5px 12px;font-size:12px;color:var(--stop);">удалить</button>
@@ -1598,7 +1614,7 @@ function staffHTML(){
       <div class="section-title" style="margin-top:0;">Сотрудники и ставка премии</div>
       <div style="overflow-x:auto;">
       <table class="data-table">
-        <thead><tr><th>Сотрудник</th><th>Ставка за водителя</th><th></th></tr></thead>
+        <thead><tr><th>Сотрудник</th><th>Ставка за водителя</th><th>Добавлено ID</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       </div>
