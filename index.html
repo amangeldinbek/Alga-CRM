@@ -551,7 +551,7 @@ async function storeGet(key, fallback){
   if(!FIREBASE_CONFIGURED) return fallback;
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
-    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?access_token=${AUTH_ID_TOKEN}` : "";
+    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
     const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`);
     if(!res.ok) return fallback;
     const data = await res.json();
@@ -565,7 +565,7 @@ async function storeSet(key, value){
   if(!FIREBASE_CONFIGURED) return;
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
-    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?access_token=${AUTH_ID_TOKEN}` : "";
+    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
     await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {
       method: "PUT",
       headers: {"Content-Type":"application/json"},
@@ -579,7 +579,7 @@ async function storeDelete(key){
   if(!FIREBASE_CONFIGURED) return;
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
-    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?access_token=${AUTH_ID_TOKEN}` : "";
+    const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
     await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {method:"DELETE"});
   }catch(e){}
 }
