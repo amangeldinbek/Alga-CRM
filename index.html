@@ -562,17 +562,26 @@ async function storeGet(key, fallback){
   }
 }
 async function storeSet(key, value){
-  if(!FIREBASE_CONFIGURED) return;
+  if(!FIREBASE_CONFIGURED) return false;
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
-    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {
+    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {
       method: "PUT",
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify(value)
     });
+    if(!res.ok){
+      const body = await res.text().catch(()=> "");
+      console.error("storage set REJECTED", key, res.status, body);
+      LAST_STORE_ERROR = `Не удалось сохранить «${key}» (код ${res.status}). ${body || ""}`.trim();
+      return false;
+    }
+    return true;
   }catch(e){
     console.error("storage set failed", key, e);
+    LAST_STORE_ERROR = `Не удалось сохранить «${key}»: ${e.message||e}`;
+    return false;
   }
 }
 async function storeDelete(key){
@@ -656,6 +665,7 @@ let DUP_FILTER_STATUS = "all", DUP_FILTER_CALLED = "all", DUP_SORT = "parks_desc
 let DUPLICATES_DATA = [];
 let CALL_STATS = {}; // { "dayKey|staffName": {dayKey, staffName, called, agreed} } — Отдел Возврата only
 let CALL_REGISTRY = {}; // { "lic:XXX" or "fio:xxx": {called, calledDate, comment} } — cross-park, all real parks
+let LAST_STORE_ERROR = null; // set by storeSet when a Firebase write is actually rejected (auth/rules)
 let PARSED_IMPORT = null;
 let PARSED_PARK = null, PARSED_COMMISSION_SUM = 0;
 let PARSED_EXTRA = null;
@@ -759,9 +769,11 @@ async function loadPark(park){
 }
 
 async function persistAll(){
-  await storeSet(`drivers:${ACTIVE_PARK}`, DRIVERS);
-  await storeSet(`snapshots:${ACTIVE_PARK}`, SNAPSHOTS);
-  await storeSet(`log:${ACTIVE_PARK}`, LOG);
+  LAST_STORE_ERROR = null;
+  const r1 = await storeSet(`drivers:${ACTIVE_PARK}`, DRIVERS);
+  const r2 = await storeSet(`snapshots:${ACTIVE_PARK}`, SNAPSHOTS);
+  const r3 = await storeSet(`log:${ACTIVE_PARK}`, LOG);
+  return r1 && r2 && r3;
 }
 
 async function saveMonthlyOverride(monthKey, amount){
@@ -2476,7 +2488,8 @@ async function importSnapshot(date, rows){
   const state = {drivers: DRIVERS, snapshots: SNAPSHOTS, log: LOG};
   const result = applyImportToState(state, date, rows);
   SNAPSHOTS = state.snapshots;
-  await persistAll();
+  const saved = await persistAll();
+  if(!saved) result.saveError = LAST_STORE_ERROR || "Не удалось сохранить в базу — проверьте подключение или права доступа.";
   return result;
 }
 
@@ -2559,7 +2572,10 @@ async function addVozvratCandidatesBulk(rawText, responsible, date){
       added++;
     }
   });
-  await persistAll();
+  const saved = await persistAll();
+  if(!saved){
+    return {error: LAST_STORE_ERROR || "Не удалось сохранить данные в базу — проверьте подключение или права доступа.", invalidTokens};
+  }
   return {ok:true, total: validIds.length, added, updated, moved, invalidTokens};
 }
 
@@ -2603,8 +2619,10 @@ async function checkVozvratAgainstFullList(fullSet, date){
   if(existingIdx>=0) SNAPSHOTS[existingIdx] = {date, counts, commission};
   else SNAPSHOTS.push({date, counts, commission});
   SNAPSHOTS.sort((a,b)=> a.date<b.date?-1:a.date>b.date?1:0);
-  await persistAll();
-  return {departedCount, checked: Object.keys(DRIVERS).length};
+  const saved = await persistAll();
+  const out = {departedCount, checked: Object.keys(DRIVERS).length};
+  if(!saved) out.saveError = LAST_STORE_ERROR || "Не удалось сохранить в базу — проверьте подключение или права доступа.";
+  return out;
 }
 
 // Removes a snapshot (e.g. an accidental duplicate upload) and recomputes every driver's
@@ -2670,9 +2688,10 @@ async function importSnapshotForPark(park, date, rows){
   }
   const state = await loadParkStateRaw(park);
   const result = applyImportToState(state, date, rows);
-  await storeSet(`drivers:${park}`, state.drivers);
-  await storeSet(`snapshots:${park}`, state.snapshots);
-  await storeSet(`log:${park}`, state.log);
+  const r1 = await storeSet(`drivers:${park}`, state.drivers);
+  const r2 = await storeSet(`snapshots:${park}`, state.snapshots);
+  const r3 = await storeSet(`log:${park}`, state.log);
+  if(!(r1 && r2 && r3)) result.saveError = LAST_STORE_ERROR || "Не удалось сохранить в базу — проверьте подключение или права доступа.";
   return result;
 }
 
@@ -3200,7 +3219,11 @@ document.getElementById("confirmImportBtn").addEventListener("click", async ()=>
     btn.textContent = "Импортировать";
     hideModal("uploadModal");
     renderAll();
-    showToast(`Проверено ${res2.checked} кандидатов: ${res2.departedCount} выехало впервые.`, 6000);
+    if(res2.saveError){
+      showToast(`Ошибка сохранения: ${res2.saveError}`, 8000);
+    } else {
+      showToast(`Проверено ${res2.checked} кандидатов: ${res2.departedCount} выехало впервые.`, 6000);
+    }
     return;
   }
 
@@ -3212,7 +3235,11 @@ document.getElementById("confirmImportBtn").addEventListener("click", async ()=>
   btn.textContent = "Импортировать";
   hideModal("uploadModal");
   if(PARSED_PARK === ACTIVE_PARK) renderAll();
-  showToast(`Сверка ${PARSED_PARK} за ${fmtDMYHM(date)}: ${res.departedCount} выехало впервые, ${res.newCount} новых регистраций${res.missingCount ? `, ${res.missingCount} отсутствует в выгрузке` : ""}.`, 6000);
+  if(res.saveError){
+    showToast(`Ошибка сохранения: ${res.saveError}`, 8000);
+  } else {
+    showToast(`Сверка ${PARSED_PARK} за ${fmtDMYHM(date)}: ${res.departedCount} выехало впервые, ${res.newCount} новых регистраций${res.missingCount ? `, ${res.missingCount} отсутствует в выгрузке` : ""}.`, 6000);
+  }
 });
 
 document.getElementById("folderStatusBtn").addEventListener("click", ()=>{
