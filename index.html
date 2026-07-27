@@ -726,7 +726,7 @@ async function loadPark(park){
   const storedLog = await storeGet(`log:${park}`, null);
   MONTHLY_OVERRIDES = await storeGet(`overrides:${park}`, {});
 
-  if(!storedDrivers || !storedSnaps){
+  if(!storedDrivers){
     DRIVERS = {};
     seed.drivers.forEach(d=>{
       DRIVERS[d.id] = Object.assign({}, d);
@@ -748,7 +748,7 @@ async function loadPark(park){
     await persistAll();
   }else{
     DRIVERS = storedDrivers;
-    SNAPSHOTS = storedSnaps;
+    SNAPSHOTS = storedSnaps || [];
     LOG = storedLog || [];
   }
 
@@ -2671,8 +2671,8 @@ async function loadParkStateRaw(park){
   const storedDrivers = await storeGet(`drivers:${park}`, null);
   const storedSnaps = await storeGet(`snapshots:${park}`, null);
   const storedLog = await storeGet(`log:${park}`, null);
-  if(storedDrivers && storedSnaps){
-    return { drivers: storedDrivers, snapshots: storedSnaps, log: storedLog || [] };
+  if(storedDrivers){
+    return { drivers: storedDrivers, snapshots: storedSnaps || [], log: storedLog || [] };
   }
   const seed = SEED[park];
   const drivers = {};
