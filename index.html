@@ -552,7 +552,7 @@ async function storeGet(key, fallback){
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
-    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`);
+    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {cache: "no-store"});
     if(!res.ok) return fallback;
     const data = await res.json();
     return (data === null || data === undefined) ? fallback : data;
@@ -569,7 +569,8 @@ async function storeSet(key, value){
     const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {
       method: "PUT",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify(value)
+      body: JSON.stringify(value),
+      cache: "no-store"
     });
     if(!res.ok){
       const body = await res.text().catch(()=> "");
@@ -589,7 +590,7 @@ async function storeDelete(key){
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
-    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {method:"DELETE"});
+    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {method:"DELETE", cache:"no-store"});
   }catch(e){}
 }
 
@@ -2530,6 +2531,7 @@ async function addVozvratCandidate(id, responsible, date){
 // they're all attributed to the same responsible name in a single persist, instead of one
 // network round-trip per driver.
 async function addVozvratCandidatesBulk(rawText, responsible, date){
+  const targetPark = ACTIVE_PARK; // captured now — if the user switches park mid-operation, we still save to VOZVRAT
   const tokens = (rawText||"").split(/[\s,;]+/).map(t=>t.trim().toLowerCase()).filter(Boolean);
   const uniqueTokens = Array.from(new Set(tokens));
   const validIds = uniqueTokens.filter(t=>ID_RE.test(t));
@@ -2547,13 +2549,19 @@ async function addVozvratCandidatesBulk(rawText, responsible, date){
     }catch(e){}
   }
 
+  // Work on a fresh copy of the target park's CURRENT stored state, not the possibly-stale
+  // live DRIVERS/LOG (which may have been swapped out if the user navigated away meanwhile).
+  const workState = targetPark === ACTIVE_PARK
+    ? {drivers: DRIVERS, log: LOG}
+    : await loadParkStateRaw(targetPark);
+
   let added = 0, updated = 0, moved = 0;
   validIds.forEach(cleanId=>{
     const hit = lookup[cleanId];
-    const prev = DRIVERS[cleanId];
+    const prev = workState.drivers[cleanId];
     if(prev){
       if(prev.regDate !== date) moved++;
-      DRIVERS[cleanId] = Object.assign({}, prev, {
+      workState.drivers[cleanId] = Object.assign({}, prev, {
         responsible: responsible || prev.responsible,
         agreed: true,
         regDate: date,
@@ -2563,18 +2571,23 @@ async function addVozvratCandidatesBulk(rawText, responsible, date){
       });
       updated++;
     } else {
-      DRIVERS[cleanId] = {
+      workState.drivers[cleanId] = {
         id: cleanId, fio: (hit&&hit.fio)||"", callSign:"", phone:(hit&&hit.phone)||"", city:(hit&&hit.city)||"", park:"VOZVRAT",
         regDate: date, trips: 0, workStatus:"", lastOrderDate:"",
         responsible: responsible||"", source:"", comment:"", parkCommission:0, agreed:true
       };
-      LOG.push({date, id:cleanId, fio: DRIVERS[cleanId].fio, event:"Новая регистрация", tripsBefore:0, tripsAfter:0, statusBefore:null, statusAfter:"Не поехал"});
+      workState.log.push({date, id:cleanId, fio: workState.drivers[cleanId].fio, event:"Новая регистрация", tripsBefore:0, tripsAfter:0, statusBefore:null, statusAfter:"Не поехал"});
       added++;
     }
   });
-  const saved = await persistAll();
-  if(!saved){
+  const r1 = await storeSet(`drivers:${targetPark}`, workState.drivers);
+  const r2 = await storeSet(`log:${targetPark}`, workState.log);
+  if(!(r1 && r2)){
     return {error: LAST_STORE_ERROR || "Не удалось сохранить данные в базу — проверьте подключение или права доступа.", invalidTokens};
+  }
+  if(targetPark === ACTIVE_PARK){
+    DRIVERS = workState.drivers;
+    LOG = workState.log;
   }
   return {ok:true, total: validIds.length, added, updated, moved, invalidTokens};
 }
