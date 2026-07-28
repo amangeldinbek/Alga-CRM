@@ -547,19 +547,33 @@ function signOut(){
   location.reload();
 }
 
-async function storeGet(key, fallback){
-  if(!FIREBASE_CONFIGURED) return fallback;
+// Distinguishes "read succeeded, genuinely nothing there" (ok:true, value:null) from
+// "the read itself failed" (ok:false) — critical because loadPark used to treat ANY failed
+// read as "this park is empty" and would then WRITE that assumption back to Firebase,
+// silently wiping real shared data if a read ever failed transiently (network blip, token
+// not ready yet, etc). Callers that gate a destructive "re-seed and save" action MUST use
+// this and refuse to proceed on ok:false, rather than treating a failure as emptiness.
+async function storeGetSafe(key){
+  if(!FIREBASE_CONFIGURED) return {ok:false};
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
     const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {cache: "no-store"});
-    if(!res.ok) return fallback;
+    if(!res.ok){
+      console.error("storage get REJECTED", key, res.status);
+      return {ok:false, status:res.status};
+    }
     const data = await res.json();
-    return (data === null || data === undefined) ? fallback : data;
+    return {ok:true, value: data};
   }catch(e){
     console.error("storage get failed", key, e);
-    return fallback;
+    return {ok:false};
   }
+}
+async function storeGet(key, fallback){
+  const r = await storeGetSafe(key);
+  if(!r.ok) return fallback;
+  return (r.value === null || r.value === undefined) ? fallback : r.value;
 }
 async function storeSet(key, value){
   if(!FIREBASE_CONFIGURED) return false;
@@ -721,7 +735,21 @@ function todayISOForLeaderboard(){
 async function loadPark(park){
   ACTIVE_PARK = park;
   const seed = SEED[park];
-  const storedDrivers = await storeGet(`drivers:${park}`, null);
+  const driversResult = await storeGetSafe(`drivers:${park}`);
+
+  if(!driversResult.ok){
+    // The read itself FAILED (network/auth/permission issue) — this is NOT the same as "the
+    // park has no data yet". Refuse to guess: never re-seed or persist here, since that would
+    // silently overwrite real shared data for everyone with an empty seed. Show empty locally,
+    // warn the user, and stop — nothing gets written.
+    DRIVERS = {}; SNAPSHOTS = []; LOG = []; MONTHLY_OVERRIDES = {};
+    showToast("Не удалось загрузить данные из базы (проблема с сетью или доступом). Показано пусто, но ваши реальные данные НЕ тронуты — обновите страницу и попробуйте снова, прежде чем что-либо добавлять.", 10000);
+    SEARCH_Q = ""; FILTER_STATUS = "all"; FILTER_CITY = "all";
+    document.getElementById("syncDateInput").value = nowLocalInputValue();
+    renderAll();
+    return;
+  }
+  const storedDrivers = driversResult.value;
   const storedSnaps = await storeGet(`snapshots:${park}`, null);
   const storedLog = await storeGet(`log:${park}`, null);
   MONTHLY_OVERRIDES = await storeGet(`overrides:${park}`, {});
@@ -2554,6 +2582,9 @@ async function addVozvratCandidatesBulk(rawText, responsible, date){
   const workState = targetPark === ACTIVE_PARK
     ? {drivers: DRIVERS, log: LOG}
     : await loadParkStateRaw(targetPark);
+  if(workState.ok === false){
+    return {error: "Не удалось прочитать текущие данные перед сохранением — ничего не изменено, чтобы не потерять существующих водителей. Попробуйте ещё раз.", invalidTokens};
+  }
 
   let added = 0, updated = 0, moved = 0;
   validIds.forEach(cleanId=>{
@@ -2668,11 +2699,17 @@ async function deleteSnapshot(date){
 // Loads a park's persisted (or seeded) state WITHOUT touching the live UI state — used for
 // background imports (e.g. folder auto-import) that target a park other than the one on screen.
 async function loadParkStateRaw(park){
-  const storedDrivers = await storeGet(`drivers:${park}`, null);
+  const driversResult = await storeGetSafe(`drivers:${park}`);
+  if(!driversResult.ok){
+    // Read failed — return a marker so any caller that might SAVE based on this result knows
+    // not to trust it as "genuinely empty" and risk overwriting real data with seed data.
+    return { drivers:{}, snapshots:[], log:[], ok:false };
+  }
+  const storedDrivers = driversResult.value;
   const storedSnaps = await storeGet(`snapshots:${park}`, null);
   const storedLog = await storeGet(`log:${park}`, null);
   if(storedDrivers){
-    return { drivers: storedDrivers, snapshots: storedSnaps || [], log: storedLog || [] };
+    return { drivers: storedDrivers, snapshots: storedSnaps || [], log: storedLog || [], ok:true };
   }
   const seed = SEED[park];
   const drivers = {};
@@ -2690,7 +2727,7 @@ async function loadParkStateRaw(park){
       }
     });
   }
-  return { drivers, snapshots, log };
+  return { drivers, snapshots, log, ok:true };
 }
 
 // Imports into ANY park (routes to live-state path if it's the active park, otherwise loads,
