@@ -577,6 +577,11 @@ async function storeGet(key, fallback){
 }
 async function storeSet(key, value){
   if(!FIREBASE_CONFIGURED) return false;
+  if(LOAD_BLOCKED){
+    console.error("storage set BLOCKED — last load failed, refusing to write", key);
+    LAST_STORE_ERROR = "Запись заблокирована: последняя загрузка данных не удалась. Обновите страницу и попробуйте снова.";
+    return false;
+  }
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
@@ -681,6 +686,7 @@ let DUPLICATES_DATA = [];
 let CALL_STATS = {}; // { "dayKey|staffName": {dayKey, staffName, called, agreed} } — Отдел Возврата only
 let CALL_REGISTRY = {}; // { "lic:XXX" or "fio:xxx": {called, calledDate, comment} } — cross-park, all real parks
 let LAST_STORE_ERROR = null; // set by storeSet when a Firebase write is actually rejected (auth/rules)
+let LOAD_BLOCKED = false; // true when the last park load failed — blocks ALL writes as a safety net
 let PARSED_IMPORT = null;
 let PARSED_PARK = null, PARSED_COMMISSION_SUM = 0;
 let PARSED_EXTRA = null;
@@ -739,16 +745,22 @@ async function loadPark(park){
 
   if(!driversResult.ok){
     // The read itself FAILED (network/auth/permission issue) — this is NOT the same as "the
-    // park has no data yet". Refuse to guess: never re-seed or persist here, since that would
-    // silently overwrite real shared data for everyone with an empty seed. Show empty locally,
-    // warn the user, and stop — nothing gets written.
-    DRIVERS = {}; SNAPSHOTS = []; LOG = []; MONTHLY_OVERRIDES = {};
-    showToast("Не удалось загрузить данные из базы (проблема с сетью или доступом). Показано пусто, но ваши реальные данные НЕ тронуты — обновите страницу и попробуйте снова, прежде чем что-либо добавлять.", 10000);
-    SEARCH_Q = ""; FILTER_STATUS = "all"; FILTER_CITY = "all";
-    document.getElementById("syncDateInput").value = nowLocalInputValue();
-    renderAll();
+    // park has no data yet". We must not let the user do ANYTHING from here: even just showing
+    // an empty screen with a warning isn't safe, because if they don't notice the warning and
+    // add a candidate anyway, saving that would overwrite the real shared data with "empty +
+    // one new item". So instead: hard-block the whole screen, no calendar, no buttons, nothing
+    // clickable, until a reload actually succeeds.
+    LOAD_BLOCKED = true;
+    document.getElementById("app").innerHTML = `
+      <div style="max-width:520px;margin:80px auto;padding:32px 28px;background:#fff;border:2px solid var(--stop);border-radius:16px;font-family:'IBM Plex Sans',sans-serif;text-align:center;">
+        <h2 style="font-family:'Space Grotesk',sans-serif;margin:0 0 12px;color:var(--stop);">Не удалось загрузить данные</h2>
+        <p style="color:var(--muted);line-height:1.6;">Проблема с сетью или доступом к базе — данные ${escapeHTML(park)} не прочитались. Чтобы не рисковать перезаписью реальных данных, всё заблокировано, пока загрузка не пройдёт успешно.</p>
+        <button class="btn-primary" id="retryLoadBtn" style="margin-top:16px;padding:12px 28px;">Попробовать снова</button>
+      </div>`;
+    document.getElementById("retryLoadBtn").onclick = ()=> loadPark(park);
     return;
   }
+  LOAD_BLOCKED = false;
   const storedDrivers = driversResult.value;
   const storedSnaps = await storeGet(`snapshots:${park}`, null);
   const storedLog = await storeGet(`log:${park}`, null);
