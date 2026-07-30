@@ -809,8 +809,21 @@ async function loadPark(park){
   renderAll();
 }
 
+// Firebase rejects a write once the payload gets too large ("Data to write exceeds the maximum
+// size that can be modified with a single request") — and since every save rewrites the WHOLE
+// snapshots array (not just the newest entry), a long history for a large park (like YAPARTNER's
+// 1000+ drivers) eventually stops fitting in one request. Keep only the most recent checkpoints;
+// this bounds every future write, at the cost of very old snapshot-level granularity (monthly
+// commission totals for very old months use whatever the oldest remaining checkpoint covers).
+const MAX_SNAPSHOTS_KEPT = 20;
+function pruneSnapshots(snapshots){
+  if(!snapshots || snapshots.length <= MAX_SNAPSHOTS_KEPT) return snapshots || [];
+  return snapshots.slice(-MAX_SNAPSHOTS_KEPT);
+}
+
 async function persistAll(){
   LAST_STORE_ERROR = null;
+  SNAPSHOTS = pruneSnapshots(SNAPSHOTS);
   const r1 = await storeSet(`drivers:${ACTIVE_PARK}`, DRIVERS);
   const r2 = await storeSet(`snapshots:${ACTIVE_PARK}`, SNAPSHOTS);
   const r3 = await storeSet(`log:${ACTIVE_PARK}`, LOG);
@@ -2750,6 +2763,7 @@ async function importSnapshotForPark(park, date, rows){
   }
   const state = await loadParkStateRaw(park);
   const result = applyImportToState(state, date, rows);
+  state.snapshots = pruneSnapshots(state.snapshots);
   const r1 = await storeSet(`drivers:${park}`, state.drivers);
   const r2 = await storeSet(`snapshots:${park}`, state.snapshots);
   const r3 = await storeSet(`log:${park}`, state.log);
