@@ -553,12 +553,17 @@ function signOut(){
 // silently wiping real shared data if a read ever failed transiently (network blip, token
 // not ready yet, etc). Callers that gate a destructive "re-seed and save" action MUST use
 // this and refuse to proceed on ok:false, rather than treating a failure as emptiness.
+function storeUrl(key, authParam){
+  const segments = Array.isArray(key) ? key : [key];
+  const path = segments.map(encodeURIComponent).join("/");
+  return `${FIREBASE_URL}/${path}.json${authParam}`;
+}
 async function storeGetSafe(key){
   if(!FIREBASE_CONFIGURED) return {ok:false};
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
-    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {cache: "no-store"});
+    const res = await fetch(storeUrl(key, authParam), {cache: "no-store"});
     if(!res.ok){
       console.error("storage get REJECTED", key, res.status);
       return {ok:false, status:res.status};
@@ -585,7 +590,7 @@ async function storeSet(key, value){
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
-    const res = await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {
+    const res = await fetch(storeUrl(key, authParam), {
       method: "PUT",
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify(value),
@@ -604,12 +609,31 @@ async function storeSet(key, value){
     return false;
   }
 }
+// Store each park's snapshot HISTORY as a nested Firebase path (snapshotsByDate/{park}/{date})
+// instead of one big array under a single key — saving a NEW/changed snapshot then only writes
+// THAT one (small) entry, never the whole history, so a large park's accumulated history can
+// no longer block a save the way the old single-array design did.
+async function loadSnapshotsForPark(park){
+  const result = await storeGetSafe(["snapshotsByDate", park]);
+  if(!result.ok) return {ok:false};
+  const tree = result.value || {};
+  const arr = Object.keys(tree).map(k => tree[k]).filter(Boolean);
+  arr.sort((a,b)=> a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+  return {ok:true, value: arr};
+}
+async function saveOneSnapshot(park, snapshot){
+  return await storeSet(["snapshotsByDate", park, snapshot.date], snapshot);
+}
+async function deleteOneSnapshot(park, date){
+  await storeDelete(["snapshotsByDate", park, date]);
+}
+
 async function storeDelete(key){
   if(!FIREBASE_CONFIGURED) return;
   try{
     if(AUTH_CONFIGURED) await refreshIdTokenIfNeeded();
     const authParam = AUTH_CONFIGURED && AUTH_ID_TOKEN ? `?auth=${AUTH_ID_TOKEN}` : "";
-    await fetch(`${FIREBASE_URL}/${encodeURIComponent(key)}.json${authParam}`, {method:"DELETE", cache:"no-store"});
+    await fetch(storeUrl(key, authParam), {method:"DELETE", cache:"no-store"});
   }catch(e){}
 }
 
@@ -763,7 +787,7 @@ async function loadPark(park){
   LOAD_BLOCKED = false;
   const storedDrivers = driversResult.value;
 
-  const snapsResult = await storeGetSafe(`snapshots:${park}`);
+  const snapsResult = await loadSnapshotsForPark(park);
   const logResult = await storeGetSafe(`log:${park}`);
   if(!snapsResult.ok || !logResult.ok){
     // Same protection as the drivers read above — snapshots/log are the LARGEST payloads (the
@@ -779,7 +803,14 @@ async function loadPark(park){
     document.getElementById("retryLoadBtn").onclick = ()=> loadPark(park);
     return;
   }
-  const storedSnaps = snapsResult.value;
+  let storedSnaps = snapsResult.value;
+  if(!storedSnaps || !storedSnaps.length){
+    // One-time best-effort migration from the old single-array key, if this park still has
+    // data there from before the per-date storage redesign. Not hard-blocking: if this
+    // particular read fails, we simply start fresh in the new structure — nothing destructive.
+    const legacy = await storeGet(`snapshots:${park}`, null);
+    if(legacy && legacy.length) storedSnaps = legacy;
+  }
   const storedLog = logResult.value;
   MONTHLY_OVERRIDES = await storeGet(`overrides:${park}`, {});
 
@@ -802,7 +833,12 @@ async function loadPark(park){
         }
       });
     }
-    await persistAll();
+    await storeSet(`drivers:${park}`, DRIVERS);
+    for(const snap of SNAPSHOTS){
+      await saveOneSnapshot(park, snap);
+    }
+    LOG = pruneLog(LOG);
+    await storeSet(`log:${park}`, LOG);
   }else{
     DRIVERS = storedDrivers;
     SNAPSHOTS = storedSnaps || [];
@@ -847,12 +883,15 @@ function pruneToByteLimit(arr){
 function pruneSnapshots(snapshots){ return pruneToByteLimit(snapshots); }
 function pruneLog(log){ return pruneToByteLimit(log); }
 
-async function persistAll(){
+async function persistAll(snapshotDate){
   LAST_STORE_ERROR = null;
-  SNAPSHOTS = pruneSnapshots(SNAPSHOTS);
-  LOG = pruneLog(LOG);
   const r1 = await storeSet(`drivers:${ACTIVE_PARK}`, DRIVERS);
-  const r2 = await storeSet(`snapshots:${ACTIVE_PARK}`, SNAPSHOTS);
+  let r2 = true;
+  if(snapshotDate){
+    const snap = SNAPSHOTS.find(s=>s.date===snapshotDate);
+    if(snap) r2 = await saveOneSnapshot(ACTIVE_PARK, snap);
+  }
+  LOG = pruneLog(LOG);
   const r3 = await storeSet(`log:${ACTIVE_PARK}`, LOG);
   return r1 && r2 && r3;
 }
@@ -2569,7 +2608,7 @@ async function importSnapshot(date, rows){
   const state = {drivers: DRIVERS, snapshots: SNAPSHOTS, log: LOG};
   const result = applyImportToState(state, date, rows);
   SNAPSHOTS = state.snapshots;
-  const saved = await persistAll();
+  const saved = await persistAll(date);
   if(!saved) result.saveError = LAST_STORE_ERROR || "Не удалось сохранить в базу — проверьте подключение или права доступа.";
   return result;
 }
@@ -2715,7 +2754,7 @@ async function checkVozvratAgainstFullList(fullSet, date){
   if(existingIdx>=0) SNAPSHOTS[existingIdx] = {date, counts, commission};
   else SNAPSHOTS.push({date, counts, commission});
   SNAPSHOTS.sort((a,b)=> a.date<b.date?-1:a.date>b.date?1:0);
-  const saved = await persistAll();
+  const saved = await persistAll(date);
   const out = {departedCount, checked: Object.keys(DRIVERS).length};
   if(!saved) out.saveError = LAST_STORE_ERROR || "Не удалось сохранить в базу — проверьте подключение или права доступа.";
   return out;
@@ -2744,6 +2783,7 @@ async function deleteSnapshot(date){
 
   LOG = LOG.filter(e => e.date !== date);
 
+  await deleteOneSnapshot(ACTIVE_PARK, date);
   await persistAll();
   return {ok:true};
 }
@@ -2758,12 +2798,16 @@ async function loadParkStateRaw(park){
     return { drivers:{}, snapshots:[], log:[], ok:false };
   }
   const storedDrivers = driversResult.value;
-  const snapsResult = await storeGetSafe(`snapshots:${park}`);
+  const snapsResult = await loadSnapshotsForPark(park);
   const logResult = await storeGetSafe(`log:${park}`);
   if(!snapsResult.ok || !logResult.ok){
     return { drivers:{}, snapshots:[], log:[], ok:false };
   }
-  const storedSnaps = snapsResult.value;
+  let storedSnaps = snapsResult.value;
+  if(!storedSnaps || !storedSnaps.length){
+    const legacy = await storeGet(`snapshots:${park}`, null);
+    if(legacy && legacy.length) storedSnaps = legacy;
+  }
   const storedLog = logResult.value;
   if(storedDrivers){
     return { drivers: storedDrivers, snapshots: storedSnaps || [], log: storedLog || [], ok:true };
@@ -2795,10 +2839,10 @@ async function importSnapshotForPark(park, date, rows){
   }
   const state = await loadParkStateRaw(park);
   const result = applyImportToState(state, date, rows);
-  state.snapshots = pruneSnapshots(state.snapshots);
   state.log = pruneLog(state.log);
   const r1 = await storeSet(`drivers:${park}`, state.drivers);
-  const r2 = await storeSet(`snapshots:${park}`, state.snapshots);
+  const snap = state.snapshots.find(s=>s.date===date);
+  const r2 = snap ? await saveOneSnapshot(park, snap) : true;
   const r3 = await storeSet(`log:${park}`, state.log);
   if(!(r1 && r2 && r3)) result.saveError = LAST_STORE_ERROR || "Не удалось сохранить в базу — проверьте подключение или права доступа.";
   return result;
