@@ -762,8 +762,25 @@ async function loadPark(park){
   }
   LOAD_BLOCKED = false;
   const storedDrivers = driversResult.value;
-  const storedSnaps = await storeGet(`snapshots:${park}`, null);
-  const storedLog = await storeGet(`log:${park}`, null);
+
+  const snapsResult = await storeGetSafe(`snapshots:${park}`);
+  const logResult = await storeGetSafe(`log:${park}`);
+  if(!snapsResult.ok || !logResult.ok){
+    // Same protection as the drivers read above — snapshots/log are the LARGEST payloads (the
+    // very ones most likely to fail a read, e.g. for a big park's long history) and must never
+    // be silently treated as "empty" on a failed read, or a later save would wipe real history.
+    LOAD_BLOCKED = true;
+    document.getElementById("app").innerHTML = `
+      <div style="max-width:520px;margin:80px auto;padding:32px 28px;background:#fff;border:2px solid var(--stop);border-radius:16px;font-family:'IBM Plex Sans',sans-serif;text-align:center;">
+        <h2 style="font-family:'Space Grotesk',sans-serif;margin:0 0 12px;color:var(--stop);">Не удалось загрузить данные</h2>
+        <p style="color:var(--muted);line-height:1.6;">Проблема с сетью или доступом к базе — история сверок/лога ${escapeHTML(park)} не прочиталась. Чтобы не рисковать перезаписью реальных данных, всё заблокировано, пока загрузка не пройдёт успешно.</p>
+        <button class="btn-primary" id="retryLoadBtn" style="margin-top:16px;padding:12px 28px;">Попробовать снова</button>
+      </div>`;
+    document.getElementById("retryLoadBtn").onclick = ()=> loadPark(park);
+    return;
+  }
+  const storedSnaps = snapsResult.value;
+  const storedLog = logResult.value;
   MONTHLY_OVERRIDES = await storeGet(`overrides:${park}`, {});
 
   if(!storedDrivers){
@@ -2741,8 +2758,13 @@ async function loadParkStateRaw(park){
     return { drivers:{}, snapshots:[], log:[], ok:false };
   }
   const storedDrivers = driversResult.value;
-  const storedSnaps = await storeGet(`snapshots:${park}`, null);
-  const storedLog = await storeGet(`log:${park}`, null);
+  const snapsResult = await storeGetSafe(`snapshots:${park}`);
+  const logResult = await storeGetSafe(`log:${park}`);
+  if(!snapsResult.ok || !logResult.ok){
+    return { drivers:{}, snapshots:[], log:[], ok:false };
+  }
+  const storedSnaps = snapsResult.value;
+  const storedLog = logResult.value;
   if(storedDrivers){
     return { drivers: storedDrivers, snapshots: storedSnaps || [], log: storedLog || [], ok:true };
   }
