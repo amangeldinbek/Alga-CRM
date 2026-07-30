@@ -811,19 +811,29 @@ async function loadPark(park){
 
 // Firebase rejects a write once the payload gets too large ("Data to write exceeds the maximum
 // size that can be modified with a single request") — and since every save rewrites the WHOLE
-// snapshots array (not just the newest entry), a long history for a large park (like YAPARTNER's
-// 1000+ drivers) eventually stops fitting in one request. Keep only the most recent checkpoints;
-// this bounds every future write, at the cost of very old snapshot-level granularity (monthly
-// commission totals for very old months use whatever the oldest remaining checkpoint covers).
-const MAX_SNAPSHOTS_KEPT = 20;
-function pruneSnapshots(snapshots){
-  if(!snapshots || snapshots.length <= MAX_SNAPSHOTS_KEPT) return snapshots || [];
-  return snapshots.slice(-MAX_SNAPSHOTS_KEPT);
+// array (not just the newest entry), a long history for a large park (like YAPARTNER's 1000+
+// drivers) eventually stops fitting in one request. This applies to BOTH snapshots (per-driver
+// counts/commission history) AND log (one entry per departure/registration event) — both grow
+// unboundedly over time. A fixed item COUNT doesn't scale correctly across parks of very
+// different sizes, so prune by actual serialized BYTE SIZE instead, dropping the oldest entries
+// until comfortably under a safe threshold. Costs old history for large parks; current
+// drivers/trips/commission are unaffected either way.
+const MAX_ARRAY_BYTES = 150000; // ~150KB — deliberately conservative, well under any observed Firebase rejection
+function pruneToByteLimit(arr){
+  if(!arr || !arr.length) return arr || [];
+  const out = arr.slice();
+  while(out.length > 1 && JSON.stringify(out).length > MAX_ARRAY_BYTES){
+    out.shift(); // drop the oldest until it fits
+  }
+  return out;
 }
+function pruneSnapshots(snapshots){ return pruneToByteLimit(snapshots); }
+function pruneLog(log){ return pruneToByteLimit(log); }
 
 async function persistAll(){
   LAST_STORE_ERROR = null;
   SNAPSHOTS = pruneSnapshots(SNAPSHOTS);
+  LOG = pruneLog(LOG);
   const r1 = await storeSet(`drivers:${ACTIVE_PARK}`, DRIVERS);
   const r2 = await storeSet(`snapshots:${ACTIVE_PARK}`, SNAPSHOTS);
   const r3 = await storeSet(`log:${ACTIVE_PARK}`, LOG);
@@ -2637,7 +2647,7 @@ async function addVozvratCandidatesBulk(rawText, responsible, date){
     }
   });
   const r1 = await storeSet(`drivers:${targetPark}`, workState.drivers);
-  const r2 = await storeSet(`log:${targetPark}`, workState.log);
+  const r2 = await storeSet(`log:${targetPark}`, pruneLog(workState.log));
   if(!(r1 && r2)){
     return {error: LAST_STORE_ERROR || "Не удалось сохранить данные в базу — проверьте подключение или права доступа.", invalidTokens};
   }
@@ -2764,6 +2774,7 @@ async function importSnapshotForPark(park, date, rows){
   const state = await loadParkStateRaw(park);
   const result = applyImportToState(state, date, rows);
   state.snapshots = pruneSnapshots(state.snapshots);
+  state.log = pruneLog(state.log);
   const r1 = await storeSet(`drivers:${park}`, state.drivers);
   const r2 = await storeSet(`snapshots:${park}`, state.snapshots);
   const r3 = await storeSet(`log:${park}`, state.log);
