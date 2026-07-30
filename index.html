@@ -1307,8 +1307,13 @@ function renderTabs(){
   if(driversBtn) driversBtn.style.display = isVozvrat ? "none" : "";
   const stagnantBtn = document.getElementById("stagnantTabBtn");
   if(stagnantBtn) stagnantBtn.style.display = isVozvrat ? "none" : "";
+  const isAdmin = AUTH_EMAIL === ADMIN_EMAIL;
+  const reportBtn = document.querySelector('.tab-btn[data-tab="report"]');
+  const hideReportForStaff = isVozvrat && !isAdmin;
+  if(reportBtn) reportBtn.style.display = hideReportForStaff ? "none" : "";
   if(!isVozvrat && ACTIVE_TAB === "staff"){ ACTIVE_TAB = "calendar"; }
   if(isVozvrat && (ACTIVE_TAB === "drivers" || ACTIVE_TAB === "stagnant")){ ACTIVE_TAB = "calendar"; }
+  if(hideReportForStaff && ACTIVE_TAB === "report"){ ACTIVE_TAB = "calendar"; }
 }
 
 function renderView(){
@@ -1318,7 +1323,13 @@ function renderView(){
   else if(ACTIVE_TAB === "drivers") view.innerHTML = driversHTML();
   else if(ACTIVE_TAB === "stagnant") view.innerHTML = stagnantHTML();
   else if(ACTIVE_TAB === "staff") view.innerHTML = staffHTML();
-  else if(ACTIVE_TAB === "report") view.innerHTML = (ACTIVE_PARK === "VOZVRAT" ? premiumReportHTML() : reportHTML());
+  else if(ACTIVE_TAB === "report"){
+    if(ACTIVE_PARK === "VOZVRAT" && AUTH_EMAIL !== ADMIN_EMAIL){
+      view.innerHTML = `<div class="panel panel-pad"><div class="empty-state"><h3>Доступ ограничен</h3><p>Премии и бонусы сотрудников видны только администратору.</p></div></div>`;
+    } else {
+      view.innerHTML = (ACTIVE_PARK === "VOZVRAT" ? premiumReportHTML() : reportHTML());
+    }
+  }
   else if(ACTIVE_TAB === "log") view.innerHTML = logHTML();
   attachViewHandlers();
 }
@@ -2329,13 +2340,27 @@ function parseVozvratIdCompare(text){
   if(!rows.length) return {error:"Пустой файл."};
   const header = (rows[0]||[]).map(h=>(h||"").trim());
   const lower = header.map(h=>h.toLowerCase());
-  const fullIdx = lower.findIndex(h => h.includes("поехав"));
-  const calledIdxs = [];
+
+  // Full list column: prefer one mentioning "поехав", else a column literally named "id",
+  // else just the first column.
+  let fullIdx = lower.findIndex(h => h.includes("поехав"));
+  if(fullIdx === -1) fullIdx = lower.findIndex(h => h === "id");
+  if(fullIdx === -1) fullIdx = 0;
+
+  // Employee columns: any OTHER column mentioning "обзвон"/"звонив" (name comes from
+  // parentheses at the end, e.g. "ID обзвонивших водителей (Фатима)"). If NONE of the columns
+  // use that wording, fall back to the simpler format: every remaining non-empty column is an
+  // employee column, named directly after its own header (e.g. "ID,Алмат,Арна,Бахыт,Фатима").
+  let calledIdxs = [];
   lower.forEach((h,i)=>{
+    if(i === fullIdx) return;
     if(h.includes("обзв") || h.includes("обзон") || h.includes("звонив") || h.includes("звон")) calledIdxs.push(i);
   });
+  if(!calledIdxs.length){
+    header.forEach((h,i)=>{ if(i !== fullIdx && h) calledIdxs.push(i); });
+  }
   if(fullIdx === -1 || calledIdxs.length === 0){
-    return {error:"Не удалось найти обе колонки с ID (нужна колонка со словом «поехав…» и хотя бы одна колонка со словом «обзвон…»/«звонив…»). Проверьте заголовки файла."};
+    return {error:"Не удалось найти колонки с ID. Нужна колонка со списком всех ID (например «ID» или «ID поехавших водителей») и хотя бы одна колонка с ID сотрудника."};
   }
 
   const employeeNameFor = (headerText)=>{
