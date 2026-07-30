@@ -1245,7 +1245,7 @@ function renderTopbar(){
     row.innerHTML = `
       <div class="stat-pill"><div class="num">${callTotals.called}</div><div class="lbl">Обзвонено (всего)</div></div>
       <div class="stat-pill go"><div class="num">${callTotals.agreed}</div><div class="lbl">Согласились (обзвон)</div></div>
-      <div class="stat-pill"><div class="num">${s.total}</div><div class="lbl">Добавлено по ID</div></div>
+      <div class="stat-pill"><div class="num">${s.total}</div><div class="lbl">В сверке (из файла)</div></div>
       <div class="stat-pill go"><div class="num">${s.go}</div><div class="lbl">Вернувшиеся</div></div>
     `;
   } else {
@@ -1500,44 +1500,27 @@ function openDayModal(dayKey){
 
   const dayCallEntries = Object.values(CALL_STATS||{}).filter(c=>c.dayKey===dayKey);
   const callTotals = callTotalsEarly;
-  const idsByStaffForDay = {};
-  cohort.forEach(d=>{
-    const name = d.responsible || "—";
-    idsByStaffForDay[name] = (idsByStaffForDay[name]||0) + 1;
-  });
   const callByStaff = {};
   dayCallEntries.forEach(c=>{ callByStaff[c.staffName] = c; });
-  const allStaffForDay = Array.from(new Set([...Object.keys(callByStaff), ...Object.keys(idsByStaffForDay)])).sort();
-  const totalIdsAdded = Object.values(idsByStaffForDay).reduce((s,n)=>s+n, 0);
+  const allStaffForDay = Object.keys(callByStaff).sort();
   const callStatsRows = allStaffForDay.length ? allStaffForDay.map(name=>{
     const c = callByStaff[name];
     return `<tr>
       <td data-label="Сотрудник">${escapeHTML(name)}</td>
       <td class="mono" data-label="Обзвонено">${c ? c.called : "—"}</td>
       <td class="mono" data-label="Согласились">${c ? c.agreed : "—"}</td>
-      <td class="mono" data-label="Добавлено ID">${idsByStaffForDay[name] || 0}</td>
       <td data-label="">${c ? `<button class="btn-ghost day-call-reset-btn" data-day="${dayKey}" data-staff="${escapeHTML(name)}" style="padding:3px 10px;font-size:11px;color:var(--stop);">Обнулить</button>` : ""}</td>
     </tr>`;
   }).join("") + `<tr style="font-weight:600;">
       <td data-label="Итого">Итого</td>
       <td class="mono" data-label="Обзвонено">${callTotals.called}</td>
       <td class="mono" data-label="Согласились">${callTotals.agreed}</td>
-      <td class="mono" data-label="Добавлено ID">${totalIdsAdded}</td>
       <td></td>
-    </tr>` : `<tr><td colspan="5" class="muted-sm" style="padding:8px;">Пока никто не отчитался за этот день</td></tr>`;
+    </tr>` : `<tr><td colspan="4" class="muted-sm" style="padding:8px;">Пока никто не отчитался за этот день</td></tr>`;
 
   const vozvratForms = isVozvrat ? `
-    <div class="section-title">Добавить водителей за этот день</div>
-    <div class="muted-sm" style="margin-bottom:8px;">ID через новую строку/запятую — сразу все, одному сотруднику.</div>
-    <div class="toolbar" style="margin-bottom:8px; align-items:flex-start;">
-      <textarea id="dayAddCandIds" placeholder="ID водителей — по одному на строке" rows="2" style="flex:2;min-width:200px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:'IBM Plex Mono',monospace;resize:vertical;"></textarea>
-      <select id="dayAddCandStaff" style="flex:1;min-width:160px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:13.5px;align-self:flex-start;">${staffSelectHTML}</select>
-    </div>
-    <button class="btn-primary" id="dayAddCandBtn" data-day="${dayKey}" style="padding:9px 16px;">Добавить</button>
-    <div id="dayAddCandResult" class="muted-sm" style="margin-top:8px;"></div>
-
     <div class="section-title">Обзвон за этот день (${fmtDMY(dayKey)})</div>
-    <div class="muted-sm" style="margin-bottom:8px;">Сколько водителей обзвонил и сколько согласились — отдельно от списка выше, просто счётчик по сотруднику.</div>
+    <div class="muted-sm" style="margin-bottom:8px;">Сколько водителей обзвонил и сколько согласились — просто счётчик по сотруднику. Кто из них реально выехал, определяется отдельно, при загрузке файла «Сравнение списков (ID)».</div>
     <div class="toolbar" style="margin-bottom:8px;">
       <select id="dayCallStaff" style="flex:1;min-width:160px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:13.5px;">${staffSelectHTML}</select>
       <input type="number" min="0" id="dayCallCalled" placeholder="Обзвонено" style="width:110px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:13.5px;">
@@ -1545,7 +1528,7 @@ function openDayModal(dayKey){
       <button class="btn-primary" id="dayCallSaveBtn" data-day="${dayKey}" style="padding:9px 16px;">Сохранить</button>
     </div>
     <table class="mini-table" style="margin-bottom:20px;">
-      <thead><tr><th>Сотрудник</th><th>Обзвонено</th><th>Согласились</th><th>Добавлено ID</th><th></th></tr></thead>
+      <thead><tr><th>Сотрудник</th><th>Обзвонено</th><th>Согласились</th><th></th></tr></thead>
       <tbody>${callStatsRows}</tbody>
     </table>
   ` : "";
@@ -1563,7 +1546,6 @@ function openDayModal(dayKey){
       ${isVozvrat ? `
       <div class="day-stat"><div class="num">${callTotalsEarly.called}</div><div class="lbl">Обзвонено</div></div>
       <div class="day-stat go"><div class="num">${callTotalsEarly.agreed}</div><div class="lbl">Согласились</div></div>
-      <div class="day-stat"><div class="num">${total}</div><div class="lbl">Добавлено ID</div></div>
       ` : `
       <div class="day-stat"><div class="num">${total}</div><div class="lbl">${totalLabel}</div></div>
       <div class="day-stat go"><div class="num">${go}</div><div class="lbl">${goLabel}</div></div>
@@ -1658,21 +1640,7 @@ function driversHTML(){
        <th>Работа</th>
        <th>Звонок</th>`;
 
-  const addForm = isVozvrat ? `
-    <div class="panel panel-pad" style="margin-bottom:16px;">
-      <div class="section-title" style="margin-top:0;">Добавить водителей вручную</div>
-      <div class="muted-sm" style="margin-bottom:12px;">Вставьте один или сразу несколько ID (каждый на новой строке или через запятую/пробел) — все привяжутся к одному сотруднику разом. Имя и телефон подтянутся автоматически, если ID уже есть в ALGA/YAPARTNER. Статус выезда обновится позже, когда руководитель загрузит общий список за неделю/месяц.</div>
-      <div class="toolbar" style="margin-bottom:8px; align-items:flex-start;">
-        <textarea id="addCandIdInput" placeholder="ID водителей — по одному на строке&#10;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&#10;bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" rows="3" style="flex:2;min-width:220px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:'IBM Plex Mono',monospace;resize:vertical;"></textarea>
-        <input type="text" id="addCandStaffInput" placeholder="Кто вносит (ваше имя)" style="flex:1;min-width:160px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:13.5px;align-self:flex-start;">
-      </div>
-      <button class="btn-primary" id="addCandSaveBtn" style="padding:9px 16px;">Добавить</button>
-      <div id="addCandResult" class="muted-sm" style="margin-top:10px;"></div>
-    </div>
-  ` : "";
-
   return `
-    ${addForm}
     <div class="panel panel-pad">
       <div class="toolbar">
         <input type="text" id="searchInput" placeholder="Поиск: ФИО, позывной, телефон" value="${escapeHTML(SEARCH_Q)}">
@@ -1745,7 +1713,7 @@ function staffHTML(){
   const rows = staffNames.map(name=>`<tr>
       <td data-label="Сотрудник">${escapeHTML(name)}</td>
       <td class="mono" data-label="Ставка за водителя">${fmtMoney(STAFF_RATES[name])} тг</td>
-      <td class="mono" data-label="Добавлено ID">${addedCountFor(name)}</td>
+      <td class="mono" data-label="В сверке">${addedCountFor(name)}</td>
       <td data-label="">
         <button class="btn-ghost staff-edit-btn" data-staff="${escapeHTML(name)}" style="padding:5px 12px;font-size:12px;">изменить</button>
         <button class="btn-ghost staff-delete-btn" data-staff="${escapeHTML(name)}" style="padding:5px 12px;font-size:12px;color:var(--stop);">удалить</button>
@@ -1757,7 +1725,7 @@ function staffHTML(){
       <div class="section-title" style="margin-top:0;">Сотрудники и ставка премии</div>
       <div style="overflow-x:auto;">
       <table class="data-table">
-        <thead><tr><th>Сотрудник</th><th>Ставка за водителя</th><th>Добавлено ID</th><th></th></tr></thead>
+        <thead><tr><th>Сотрудник</th><th>Ставка за водителя</th><th>В сверке</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       </div>
@@ -2638,110 +2606,10 @@ async function importSnapshot(date, rows){
   return result;
 }
 
-// Lets a single Отдел Возврата employee register one driver ID directly, without a CSV upload —
-// matches the "сотрудник вносит вручную ID в календарь" workflow. Looks the ID up in
-// ALGA/YAPARTNER for a name/phone. Only usable while VOZVRAT is the active park.
-async function addVozvratCandidate(id, responsible, date){
-  const cleanId = (id||"").trim().toLowerCase();
-  if(!ID_RE.test(cleanId)) return {error:"ID должен быть 32-значным (как в выгрузках ALGA/YAPARTNER)."};
-  let fio = "", phone = "", city = "";
-  for(const park of ["ALGA","YAPARTNER"]){
-    try{
-      const state = await loadParkStateRaw(park);
-      const hit = state.drivers[cleanId];
-      if(hit){ fio = hit.fio||fio; phone = hit.phone||phone; city = hit.city||city; break; }
-    }catch(e){}
-  }
-  const prev = DRIVERS[cleanId];
-  if(prev){
-    DRIVERS[cleanId] = Object.assign({}, prev, {
-      responsible: responsible || prev.responsible,
-      agreed: true,
-      fio: prev.fio || fio, phone: prev.phone || phone, city: prev.city || city
-    });
-  } else {
-    DRIVERS[cleanId] = {
-      id: cleanId, fio, callSign:"", phone, city, park:"VOZVRAT",
-      regDate: date, trips: 0, workStatus:"", lastOrderDate:"",
-      responsible: responsible||"", source:"", comment:"", parkCommission:0, agreed:true
-    };
-    LOG.push({date, id:cleanId, fio, event:"Новая регистрация", tripsBefore:0, tripsAfter:0, statusBefore:null, statusAfter:"Не поехал"});
-  }
-  await persistAll();
-  return {ok:true, isNew: !prev, fio: DRIVERS[cleanId].fio};
-}
-
-// Bulk version — one employee pastes a whole block of IDs (newline/comma/space separated) and
-// they're all attributed to the same responsible name in a single persist, instead of one
-// network round-trip per driver.
-async function addVozvratCandidatesBulk(rawText, responsible, date){
-  const targetPark = ACTIVE_PARK; // captured now — if the user switches park mid-operation, we still save to VOZVRAT
-  const tokens = (rawText||"").split(/[\s,;]+/).map(t=>t.trim().toLowerCase()).filter(Boolean);
-  const uniqueTokens = Array.from(new Set(tokens));
-  const validIds = uniqueTokens.filter(t=>ID_RE.test(t));
-  const invalidTokens = uniqueTokens.filter(t=>!ID_RE.test(t));
-  if(!validIds.length) return {error:"Не найдено ни одного корректного 32-значного ID.", invalidTokens};
-
-  const lookup = {};
-  for(const park of ["ALGA","YAPARTNER"]){
-    try{
-      const state = await loadParkStateRaw(park);
-      Object.values(state.drivers).forEach(d=>{
-        const key = (d.id||"").toLowerCase();
-        if(key && !lookup[key]) lookup[key] = {fio:d.fio, phone:d.phone, city:d.city};
-      });
-    }catch(e){}
-  }
-
-  // Work on a fresh copy of the target park's CURRENT stored state, not the possibly-stale
-  // live DRIVERS/LOG (which may have been swapped out if the user navigated away meanwhile).
-  const workState = targetPark === ACTIVE_PARK
-    ? {drivers: DRIVERS, log: LOG}
-    : await loadParkStateRaw(targetPark);
-  if(workState.ok === false){
-    return {error: "Не удалось прочитать текущие данные перед сохранением — ничего не изменено, чтобы не потерять существующих водителей. Попробуйте ещё раз.", invalidTokens};
-  }
-
-  let added = 0, updated = 0, moved = 0;
-  validIds.forEach(cleanId=>{
-    const hit = lookup[cleanId];
-    const prev = workState.drivers[cleanId];
-    if(prev){
-      if(prev.regDate !== date) moved++;
-      workState.drivers[cleanId] = Object.assign({}, prev, {
-        responsible: responsible || prev.responsible,
-        agreed: true,
-        regDate: date,
-        fio: prev.fio || (hit&&hit.fio) || "",
-        phone: prev.phone || (hit&&hit.phone) || "",
-        city: prev.city || (hit&&hit.city) || ""
-      });
-      updated++;
-    } else {
-      workState.drivers[cleanId] = {
-        id: cleanId, fio: (hit&&hit.fio)||"", callSign:"", phone:(hit&&hit.phone)||"", city:(hit&&hit.city)||"", park:"VOZVRAT",
-        regDate: date, trips: 0, workStatus:"", lastOrderDate:"",
-        responsible: responsible||"", source:"", comment:"", parkCommission:0, agreed:true
-      };
-      workState.log.push({date, id:cleanId, fio: workState.drivers[cleanId].fio, event:"Новая регистрация", tripsBefore:0, tripsAfter:0, statusBefore:null, statusAfter:"Не поехал"});
-      added++;
-    }
-  });
-  const r1 = await storeSet(`drivers:${targetPark}`, workState.drivers);
-  const r2 = await storeSet(`log:${targetPark}`, pruneLog(workState.log));
-  if(!(r1 && r2)){
-    return {error: LAST_STORE_ERROR || "Не удалось сохранить данные в базу — проверьте подключение или права доступа.", invalidTokens};
-  }
-  if(targetPark === ACTIVE_PARK){
-    DRIVERS = workState.drivers;
-    LOG = workState.log;
-  }
-  return {ok:true, total: validIds.length, added, updated, moved, invalidTokens};
-}
 
 // Parses a manager's periodic "who performed orders" reference file — ONE column of IDs, no
 // per-employee breakdown needed. Used to refresh departure status for candidates that were
-// already added manually via addVozvratCandidate, at the start of the week/month.
+// already present from a previous comparison-file upload, at the start of the week/month.
 function parseVozvratFullOrdersList(text){
   const parsed = Papa.parse(text, {skipEmptyLines:false});
   const rows = parsed.data;
@@ -3133,26 +3001,6 @@ function attachViewHandlers(){
         renderView();
       };
     });
-    const addCandBtn = document.getElementById("addCandSaveBtn");
-    if(addCandBtn) addCandBtn.onclick = async ()=>{
-      const raw = document.getElementById("addCandIdInput").value;
-      const staff = document.getElementById("addCandStaffInput").value.trim();
-      const resultBox = document.getElementById("addCandResult");
-      if(!staff){ showToast("Укажите, кто вносит водителей"); return; }
-      addCandBtn.disabled = true; addCandBtn.textContent = "Добавляю...";
-      const res = await addVozvratCandidatesBulk(raw, staff, nowLocalInputValue().replace("T"," "));
-      addCandBtn.disabled = false; addCandBtn.textContent = "Добавить";
-      if(res.error){
-        if(resultBox) resultBox.innerHTML = `<span style="color:var(--stop);">${escapeHTML(res.error)}</span>`;
-        showToast(res.error, 5000);
-        return;
-      }
-      document.getElementById("addCandIdInput").value = "";
-      const invalidNote = res.invalidTokens.length ? ` Пропущено нераспознанных строк: ${res.invalidTokens.length}.` : "";
-      if(resultBox) resultBox.textContent = `Готово: ${res.total} ID обработано (новых: ${res.added}, уже были — обновлён ответственный: ${res.updated}).${invalidNote}`;
-      showToast(`Добавлено/обновлено ${res.total} водителей для ${staff}.`);
-      renderView();
-    };
   } else if(ACTIVE_TAB === "staff"){
     const addStaffBtn = document.getElementById("addStaffSaveBtn");
     if(addStaffBtn) addStaffBtn.onclick = async ()=>{
@@ -3547,30 +3395,6 @@ document.getElementById("view").addEventListener("click", async (e)=>{
 });
 
 document.getElementById("dayModalBody").addEventListener("click", async (e)=>{
-  const addBtn = e.target.closest("#dayAddCandBtn");
-  if(addBtn){
-    const dayKey = addBtn.dataset.day;
-    const raw = document.getElementById("dayAddCandIds").value;
-    const staff = document.getElementById("dayAddCandStaff").value;
-    const resultBox = document.getElementById("dayAddCandResult");
-    if(!staff){ showToast("Выберите сотрудника из списка"); return; }
-    addBtn.disabled = true; addBtn.textContent = "Добавляю...";
-    const res = await addVozvratCandidatesBulk(raw, staff, dayKey + " 12:00");
-    addBtn.disabled = false; addBtn.textContent = "Добавить";
-    if(res.error){
-      if(resultBox) resultBox.innerHTML = `<span style="color:var(--stop);">${escapeHTML(res.error)}</span>`;
-      return;
-    }
-    const invalidNote = res.invalidTokens.length ? ` Пропущено нераспознанных строк: ${res.invalidTokens.length}.` : "";
-    const movedNote = res.moved ? ` Дата перенесена на этот день у ${res.moved}.` : "";
-    if(resultBox) resultBox.textContent = `Готово: ${res.total} ID обработано (новых: ${res.added}, обновлено: ${res.updated}).${movedNote}${invalidNote}`;
-    showToast(`Добавлено/обновлено ${res.total} водителей для ${staff}.`);
-    renderView();
-    renderTopbar();
-    openDayModal(dayKey);
-    return;
-  }
-
   const callBtn = e.target.closest("#dayCallSaveBtn");
   if(callBtn){
     const dayKey = callBtn.dataset.day;
@@ -3612,10 +3436,27 @@ function showApp(){
   }
 }
 
+// One-time cleanup: the Отдел Возврата used to accumulate drivers via manual per-day ID entry,
+// which has been removed in favour of the periodic "Сравнение списков (ID)" file upload. Wipe
+// that legacy pile once so the department starts clean on the new workflow. Guarded by a flag
+// in the shared database, so it happens exactly once for everyone, not on every page load.
+// Deliberately does NOT touch call tallies (vozvratCallStats) or staff rates — those stay.
+async function resetVozvratOnceIfNeeded(){
+  const alreadyDone = await storeGet("vozvratResetV2", null);
+  if(alreadyDone) return;
+  await storeDelete("drivers:VOZVRAT");
+  await storeDelete("log:VOZVRAT");
+  await storeDelete("snapshots:VOZVRAT");
+  await storeDelete(["snapshotsByDate", "VOZVRAT"]);
+  await storeSet("vozvratResetV2", {done:true, at:new Date().toISOString()});
+  console.log("VOZVRAT legacy driver data cleared (one-time reset)");
+}
+
 async function bootApp(){
   await loadStaffRates();
   await loadCallStats();
   await loadCallRegistry();
+  await resetVozvratOnceIfNeeded();
   await loadPark(ACTIVE_PARK);
   initFolder();
 }
