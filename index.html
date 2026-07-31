@@ -709,6 +709,11 @@ let DUP_FILTER_STATUS = "all", DUP_FILTER_CALLED = "all", DUP_SORT = "parks_desc
 let DUPLICATES_DATA = [];
 let CALL_STATS = {}; // { "dayKey|staffName": {dayKey, staffName, called, agreed} } — Отдел Возврата only
 let CALL_REGISTRY = {}; // { "lic:XXX" or "fio:xxx": {called, calledDate, comment} } — cross-park, all real parks
+// Отдел Возврата stores ONLY per-upload aggregates — never the driver lists themselves. One
+// upload = one small record (a few hundred bytes), so this can never grow into the payload-size
+// problems that the old per-driver storage did, and premiums no longer depend on an event log
+// that gets pruned.
+let VOZVRAT_REPORTS = {}; // { "YYYY-MM-DD HH:MM": {date, fullListCount, byStaff:{name:{called,departed}}, overlapsExcluded} }
 let LAST_STORE_ERROR = null; // set by storeSet when a Firebase write is actually rejected (auth/rules)
 let LOAD_BLOCKED = false; // true when the last park load failed — blocks ALL writes as a safety net
 let PARSED_IMPORT = null;
@@ -956,6 +961,43 @@ function callStatsTotalsAllTime(){
 // first, exact FIO as fallback) so marking a driver called in one park is immediately visible
 // for the same person in every other park and in the Дубли view — the whole point being to
 // stop staff in different parks from calling the same duplicate driver twice.
+async function loadVozvratReports(){
+  VOZVRAT_REPORTS = await storeGet("vozvratReports", {});
+}
+// Each upload is saved under its own key, so a save writes only that one small record.
+async function saveVozvratReport(report){
+  VOZVRAT_REPORTS[report.date] = report;
+  return await storeSet(["vozvratReports", report.date], report);
+}
+async function deleteVozvratReport(date){
+  delete VOZVRAT_REPORTS[date];
+  await storeDelete(["vozvratReports", date]);
+}
+// Turns a parsed comparison file straight into the aggregate we keep: per employee, how many
+// IDs they called and how many of those appear in the "performed orders" list. The driver IDs
+// themselves are used only for this count and then discarded — nothing per-driver is stored.
+function computeVozvratReport(parsed, date){
+  const byStaff = {};
+  parsed.rows.forEach(r=>{
+    const name = r.responsible || "Без сотрудника";
+    if(!byStaff[name]) byStaff[name] = {called:0, departed:0};
+    byStaff[name].called++;
+    if(r.trips > 0) byStaff[name].departed++;
+  });
+  return {
+    date,
+    fullListCount: parsed.fullListCount || 0,
+    byStaff,
+    overlapsExcluded: (parsed.overlaps || []).length
+  };
+}
+function vozvratReportTotals(){
+  return Object.values(VOZVRAT_REPORTS||{}).reduce((acc,rep)=>{
+    Object.values(rep.byStaff||{}).forEach(s=>{ acc.called += s.called||0; acc.departed += s.departed||0; });
+    return acc;
+  }, {called:0, departed:0});
+}
+
 async function loadCallRegistry(){
   CALL_REGISTRY = await storeGet("callRegistry", {});
 }
@@ -980,69 +1022,61 @@ async function setDriverComment(key, comment){
   await storeSet("callRegistry", CALL_REGISTRY);
 }
 
-// Premium report for Отдел Возврата: for every driver who both agreed AND actually departed
-// (LOG "Выехал" event), credit the responsible staff member's configured rate. Grouped by month.
+// Premium report for Отдел Возврата, computed straight from the saved per-upload aggregates.
+// Deliberately does NOT read the event log: the log gets pruned to stay under Firebase's write
+// size limit, and premiums must never silently shrink because old entries were dropped.
 function staffPremiumReport(){
   const byMonth = {}; // 'YYYY-MM-01' -> { staffName: {count, amount} }
-  LOG.filter(e => e.event === "Выехал").forEach(e=>{
-    const driver = DRIVERS[e.id];
-    if(!driver || !driver.agreed) return;
-    const staff = driver.responsible || "Без ответственного";
-    const rate = STAFF_RATES[staff] || 0;
-    const mk = periodKey(e.date, "month");
+  Object.values(VOZVRAT_REPORTS||{}).forEach(rep=>{
+    const mk = periodKey(rep.date, "month");
     byMonth[mk] = byMonth[mk] || {};
-    byMonth[mk][staff] = byMonth[mk][staff] || {count:0, amount:0};
-    byMonth[mk][staff].count++;
-    byMonth[mk][staff].amount += rate;
+    Object.keys(rep.byStaff||{}).forEach(staff=>{
+      const departed = rep.byStaff[staff].departed || 0;
+      const rate = STAFF_RATES[staff] || 0;
+      byMonth[mk][staff] = byMonth[mk][staff] || {count:0, amount:0};
+      byMonth[mk][staff].count += departed;
+      byMonth[mk][staff].amount += departed * rate;
+    });
   });
   return byMonth;
 }
 
-// Weekly leaderboard: how many drivers each staff member got to depart THIS week — for the
-// 10 000тг "who brought in the most this week" competition. Same underlying "Выехал" events
-// as the monthly premium report, just grouped by week instead of month, count only (no тг).
+// Weekly leaderboard for the 10 000тг "who brought in the most this week" competition — same
+// saved aggregates, grouped by the week each upload belongs to.
 function staffWeeklyLeaderboard(){
   const byWeek = {}; // 'YYYY-MM-DD'(monday) -> { staffName: count }
-  LOG.filter(e => e.event === "Выехал").forEach(e=>{
-    const driver = DRIVERS[e.id];
-    if(!driver || !driver.agreed) return;
-    const staff = driver.responsible || "Без ответственного";
-    const wk = mondayOfWeek(e.date.split(" ")[0]);
+  Object.values(VOZVRAT_REPORTS||{}).forEach(rep=>{
+    const wk = mondayOfWeek(rep.date.split(" ")[0]);
     byWeek[wk] = byWeek[wk] || {};
-    byWeek[wk][staff] = (byWeek[wk][staff]||0) + 1;
+    Object.keys(rep.byStaff||{}).forEach(staff=>{
+      byWeek[wk][staff] = (byWeek[wk][staff]||0) + (rep.byStaff[staff].departed || 0);
+    });
   });
   return byWeek;
 }
 
-// Full all-time summary per employee: how many they called (self-reported daily tally), how
-// many agreed (same tally), how many candidates they've added to the list, how many of those
-// actually returned (Вернулись), and their earned premium — everything in one row per person.
+// Full all-time summary per employee: the self-reported daily call tally (обзвон), plus the
+// totals accumulated across every uploaded comparison file.
 function staffFullReport(){
   const called = {}, agreedCalls = {};
-  Object.values(CALL_STATS).forEach(c=>{
+  Object.values(CALL_STATS||{}).forEach(c=>{
     called[c.staffName] = (called[c.staffName]||0) + (c.called||0);
     agreedCalls[c.staffName] = (agreedCalls[c.staffName]||0) + (c.agreed||0);
   });
-  const returned = {}, premium = {};
-  LOG.filter(e=>e.event==='Выехал').forEach(e=>{
-    const driver = DRIVERS[e.id];
-    if(!driver || !driver.agreed) return;
-    const staff = driver.responsible || "Без ответственного";
-    returned[staff] = (returned[staff]||0) + 1;
-    premium[staff] = (premium[staff]||0) + (STAFF_RATES[staff]||0);
-  });
-  const candidatesAdded = {};
-  Object.values(DRIVERS).forEach(d=>{
-    if(!d.agreed) return;
-    const staff = d.responsible || "Без ответственного";
-    candidatesAdded[staff] = (candidatesAdded[staff]||0) + 1;
+  const inFiles = {}, returned = {}, premium = {};
+  Object.values(VOZVRAT_REPORTS||{}).forEach(rep=>{
+    Object.keys(rep.byStaff||{}).forEach(staff=>{
+      const s = rep.byStaff[staff];
+      inFiles[staff] = (inFiles[staff]||0) + (s.called||0);
+      returned[staff] = (returned[staff]||0) + (s.departed||0);
+      premium[staff] = (premium[staff]||0) + (s.departed||0) * (STAFF_RATES[staff]||0);
+    });
   });
   const names = new Set([
-    ...Object.keys(called), ...Object.keys(returned),
-    ...Object.keys(candidatesAdded), ...Object.keys(STAFF_RATES)
+    ...Object.keys(called), ...Object.keys(inFiles), ...Object.keys(STAFF_RATES)
   ]);
   return Array.from(names).sort().map(name=>{
-    const c = candidatesAdded[name]||0, r = returned[name]||0;
+    const c = inFiles[name]||0, r = returned[name]||0;
     return {
       name, called: called[name]||0, agreedCalls: agreedCalls[name]||0,
       candidatesAdded: c, returned: r,
@@ -1242,11 +1276,12 @@ function renderTopbar(){
     `;
   } else if(isVozvrat){
     const callTotals = callStatsTotalsAllTime();
+    const repTotals = vozvratReportTotals();
     row.innerHTML = `
       <div class="stat-pill"><div class="num">${callTotals.called}</div><div class="lbl">Обзвонено (всего)</div></div>
       <div class="stat-pill go"><div class="num">${callTotals.agreed}</div><div class="lbl">Согласились (обзвон)</div></div>
-      <div class="stat-pill"><div class="num">${s.total}</div><div class="lbl">В сверке (из файла)</div></div>
-      <div class="stat-pill go"><div class="num">${s.go}</div><div class="lbl">Вернувшиеся</div></div>
+      <div class="stat-pill"><div class="num">${repTotals.called}</div><div class="lbl">В сверках (из файлов)</div></div>
+      <div class="stat-pill go"><div class="num">${repTotals.departed}</div><div class="lbl">Вернувшиеся</div></div>
     `;
   } else {
   const totalLabel = "Всего";
@@ -1709,7 +1744,8 @@ function stagnantHTML(){
 /* ---------------- Staff tab (Отдел Возврата — bonus rates) ---------------- */
 function staffHTML(){
   const staffNames = Object.keys(STAFF_RATES).sort();
-  const addedCountFor = name => Object.values(DRIVERS).filter(d=>d.responsible===name).length;
+  const addedCountFor = name => Object.values(VOZVRAT_REPORTS||{})
+    .reduce((sum,rep)=> sum + ((rep.byStaff && rep.byStaff[name] && rep.byStaff[name].called) || 0), 0);
   const rows = staffNames.map(name=>`<tr>
       <td data-label="Сотрудник">${escapeHTML(name)}</td>
       <td class="mono" data-label="Ставка за водителя">${fmtMoney(STAFF_RATES[name])} тг</td>
@@ -1763,8 +1799,9 @@ function premiumReportHTML(){
         <div class="day-stat"><div class="num">${Object.keys(STAFF_RATES).length}</div><div class="lbl">Сотрудников со ставкой</div></div>
       </div>
       <div class="muted-sm" style="margin-top:12px;">
-        Считается по всем водителям, у которых «Согласился = да» и которые фактически выехали (заказы выросли с 0).
-        Премия начисляется тому, кто указан «Ответственным» у этого водителя, по ставке из вкладки «Сотрудники».
+        Считается при каждой загрузке файла «Сравнение списков (ID)»: сколько ID из колонки сотрудника нашлось
+        в общем списке выполнявших заказы, умножается на его ставку из вкладки «Сотрудники». Хранятся только
+        итоговые цифры — списки водителей не сохраняются.
       </div>
     </div>
   `;
@@ -2160,11 +2197,42 @@ function snapshotManagerHTML(){
   `;
 }
 
-function logHTML(){
-  const manager = snapshotManagerHTML();
-  if(ACTIVE_PARK === "VOZVRAT"){
-    return manager || `<div class="panel panel-pad"><div class="empty-state"><h3>Сверок пока не было</h3><p>Как только руководитель загрузит «Сверку недели/месяца», здесь появится управление сверками.</p></div></div>`;
+function vozvratReportsManagerHTML(){
+  const dates = Object.keys(VOZVRAT_REPORTS||{}).sort().reverse();
+  if(!dates.length){
+    return `<div class="panel panel-pad"><div class="empty-state"><h3>Сверок пока не было</h3><p>Загрузите файл через «Сравнение списков (ID)» — здесь появится история загрузок.</p></div></div>`;
   }
+  const rows = dates.map(d=>{
+    const rep = VOZVRAT_REPORTS[d];
+    const totalCalled = Object.values(rep.byStaff||{}).reduce((s,x)=>s+(x.called||0),0);
+    const totalDep = Object.values(rep.byStaff||{}).reduce((s,x)=>s+(x.departed||0),0);
+    const perStaff = Object.keys(rep.byStaff||{}).sort()
+      .map(n=>`${escapeHTML(n)}: ${rep.byStaff[n].departed}/${rep.byStaff[n].called}`).join(", ");
+    return `<tr>
+      <td data-label="Дата сверки">${fmtDMYHM(d)}</td>
+      <td class="mono" data-label="Обзвонено">${totalCalled}</td>
+      <td class="mono" data-label="Выехало">${totalDep}</td>
+      <td class="muted-sm" data-label="По сотрудникам">${perStaff || "—"}${rep.overlapsExcluded ? ` · исключено спорных: ${rep.overlapsExcluded}` : ""}</td>
+      <td data-label=""><button class="btn-ghost vozvrat-report-delete-btn" data-date="${escapeHTML(d)}" style="padding:5px 12px;font-size:12px;color:var(--stop);">Удалить</button></td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="panel panel-pad">
+      <div class="section-title" style="margin-top:0;">Загруженные сверки</div>
+      <div class="muted-sm" style="margin-bottom:12px;">Хранятся только итоговые цифры по каждой загрузке — списки водителей не сохраняются. «Выехало/обзвонено» указано по каждому сотруднику.</div>
+      <div style="overflow-x:auto;">
+      <table class="data-table">
+        <thead><tr><th>Дата сверки</th><th>Обзвонено</th><th>Выехало</th><th>По сотрудникам</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      </div>
+    </div>
+  `;
+}
+
+function logHTML(){
+  if(ACTIVE_PARK === "VOZVRAT") return vozvratReportsManagerHTML();
+  const manager = snapshotManagerHTML();
   if(!LOG.length){
     return manager + `<div class="panel panel-pad"><div class="empty-state"><h3>Лог пуст</h3><p>Загрузите новые данные, чтобы увидеть изменения статусов.</p></div></div>`;
   }
@@ -3168,15 +3236,18 @@ document.getElementById("openUploadBtn").addEventListener("click", ()=>{
   document.getElementById("fileInput").value = "";
   document.getElementById("syncDateInput").value = nowLocalInputValue();
   document.getElementById("reportMonthInput").value = "";
+  const isV = ACTIVE_PARK === "VOZVRAT";
   const monthlyReportBtn = document.querySelector('.upload-mode-btn[data-mode="monthlyReport"]');
-  if(monthlyReportBtn) monthlyReportBtn.style.display = ACTIVE_PARK === "VOZVRAT" ? "none" : "";
+  if(monthlyReportBtn) monthlyReportBtn.style.display = isV ? "none" : "";
+  const snapshotBtn = document.querySelector('.upload-mode-btn[data-mode="snapshot"]');
+  if(snapshotBtn) snapshotBtn.style.display = isV ? "none" : "";
   const ordersOnlyBtn = document.querySelector('.upload-mode-btn[data-mode="ordersOnly"]');
-  if(ordersOnlyBtn) ordersOnlyBtn.style.display = ACTIVE_PARK === "VOZVRAT" ? "" : "none";
+  if(ordersOnlyBtn) ordersOnlyBtn.style.display = "none";
   const idCompareBtn = document.querySelector('.upload-mode-btn[data-mode="idCompare"]');
-  if(idCompareBtn) idCompareBtn.style.display = ACTIVE_PARK === "VOZVRAT" ? "" : "none";
+  if(idCompareBtn) idCompareBtn.style.display = isV ? "" : "none";
   const fullListBtn = document.querySelector('.upload-mode-btn[data-mode="fullListCheck"]');
-  if(fullListBtn) fullListBtn.style.display = ACTIVE_PARK === "VOZVRAT" ? "" : "none";
-  setUploadMode("snapshot");
+  if(fullListBtn) fullListBtn.style.display = "none";
+  setUploadMode(isV ? "idCompare" : "snapshot");
   showModal("uploadModal");
 });
 
@@ -3253,6 +3324,26 @@ document.getElementById("confirmImportBtn").addEventListener("click", async ()=>
     return;
   }
 
+  if(ACTIVE_PARK === "VOZVRAT" && UPLOAD_MODE === "idCompare"){
+    const rawV = document.getElementById("syncDateInput").value;
+    if(!rawV){ alert("Укажите дату и время сверки"); return; }
+    const dateV = rawV.replace("T", " ");
+    btn.disabled = true; btn.textContent = "Считаем...";
+    const report = computeVozvratReport(PARSED_EXTRA || {rows: PARSED_IMPORT}, dateV);
+    const okV = await saveVozvratReport(report);
+    btn.disabled = false; btn.textContent = "Импортировать";
+    if(!okV){
+      showToast(`Ошибка сохранения: ${LAST_STORE_ERROR || "не удалось записать в базу"}`, 8000);
+      return;
+    }
+    hideModal("uploadModal");
+    renderAll();
+    const totalDep = Object.values(report.byStaff).reduce((s,x)=>s+x.departed, 0);
+    const totalCalled = Object.values(report.byStaff).reduce((s,x)=>s+x.called, 0);
+    showToast(`Сверка за ${fmtDMYHM(dateV)} посчитана: обзвонено ${totalCalled}, выехало ${totalDep}.`, 6000);
+    return;
+  }
+
   const raw = document.getElementById("syncDateInput").value; // "YYYY-MM-DDTHH:MM"
   if(!raw){ alert("Укажите дату и время сверки"); return; }
   const date = raw.replace("T", " ");
@@ -3326,6 +3417,17 @@ document.getElementById("view").addEventListener("click", async (e)=>{
       console.error(err);
       showToast("Не удалось сохранить комментарий: " + (err.message||err), 5000);
     }
+    return;
+  }
+
+  const repDelBtn = e.target.closest(".vozvrat-report-delete-btn");
+  if(repDelBtn){
+    const d = repDelBtn.dataset.date;
+    if(!confirm(`Удалить сверку за ${fmtDMYHM(d)}? Её цифры перестанут учитываться в премиях и отчётах.`)) return;
+    repDelBtn.disabled = true; repDelBtn.textContent = "Удаляю...";
+    await deleteVozvratReport(d);
+    showToast(`Сверка за ${fmtDMYHM(d)} удалена.`);
+    renderAll();
     return;
   }
 
@@ -3456,6 +3558,7 @@ async function bootApp(){
   await loadStaffRates();
   await loadCallStats();
   await loadCallRegistry();
+  await loadVozvratReports();
   await resetVozvratOnceIfNeeded();
   await loadPark(ACTIVE_PARK);
   initFolder();
