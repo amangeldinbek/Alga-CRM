@@ -1336,36 +1336,43 @@ function renderTabs(){
     btn.classList.toggle("active", btn.dataset.tab === ACTIVE_TAB && btn.dataset.tab !== "reset");
   });
   const isVozvrat = ACTIVE_PARK === "VOZVRAT";
+  const isAdmin = AUTH_EMAIL === ADMIN_EMAIL;
+  // Сотрудники (ставки премий) and Лог сверок (per-staff figures / snapshot deletion) are
+  // admin-only: both expose bonus information, and the log tab can delete data.
   const staffBtn = document.getElementById("staffTabBtn");
-  if(staffBtn) staffBtn.style.display = isVozvrat ? "" : "none";
+  if(staffBtn) staffBtn.style.display = (isVozvrat && isAdmin) ? "" : "none";
   const driversBtn = document.getElementById("driversTabBtn");
   if(driversBtn) driversBtn.style.display = isVozvrat ? "none" : "";
   const stagnantBtn = document.getElementById("stagnantTabBtn");
   if(stagnantBtn) stagnantBtn.style.display = isVozvrat ? "none" : "";
-  const isAdmin = AUTH_EMAIL === ADMIN_EMAIL;
   const reportBtn = document.querySelector('.tab-btn[data-tab="report"]');
   const hideReportForStaff = isVozvrat && !isAdmin;
   if(reportBtn) reportBtn.style.display = hideReportForStaff ? "none" : "";
-  if(!isVozvrat && ACTIVE_TAB === "staff"){ ACTIVE_TAB = "calendar"; }
+  const logBtn = document.querySelector('.tab-btn[data-tab="log"]');
+  if(logBtn) logBtn.style.display = isAdmin ? "" : "none";
+  if((!isVozvrat || !isAdmin) && ACTIVE_TAB === "staff"){ ACTIVE_TAB = "calendar"; }
   if(isVozvrat && (ACTIVE_TAB === "drivers" || ACTIVE_TAB === "stagnant")){ ACTIVE_TAB = "calendar"; }
   if(hideReportForStaff && ACTIVE_TAB === "report"){ ACTIVE_TAB = "calendar"; }
+  if(!isAdmin && ACTIVE_TAB === "log"){ ACTIVE_TAB = "calendar"; }
 }
 
 function renderView(){
   const view = document.getElementById("view");
   if(SHOWING_DUPLICATES){ view.innerHTML = duplicatesReportHTML(); attachViewHandlers(); return; }
+  const isAdmin = AUTH_EMAIL === ADMIN_EMAIL;
+  const restricted = `<div class="panel panel-pad"><div class="empty-state"><h3>Доступ ограничен</h3><p>Этот раздел доступен только администратору.</p></div></div>`;
   if(ACTIVE_TAB === "calendar") view.innerHTML = calendarHTML();
   else if(ACTIVE_TAB === "drivers") view.innerHTML = driversHTML();
   else if(ACTIVE_TAB === "stagnant") view.innerHTML = stagnantHTML();
-  else if(ACTIVE_TAB === "staff") view.innerHTML = staffHTML();
+  else if(ACTIVE_TAB === "staff") view.innerHTML = isAdmin ? staffHTML() : restricted;
   else if(ACTIVE_TAB === "report"){
-    if(ACTIVE_PARK === "VOZVRAT" && AUTH_EMAIL !== ADMIN_EMAIL){
+    if(ACTIVE_PARK === "VOZVRAT" && !isAdmin){
       view.innerHTML = `<div class="panel panel-pad"><div class="empty-state"><h3>Доступ ограничен</h3><p>Премии и бонусы сотрудников видны только администратору.</p></div></div>`;
     } else {
       view.innerHTML = (ACTIVE_PARK === "VOZVRAT" ? premiumReportHTML() : reportHTML());
     }
   }
-  else if(ACTIVE_TAB === "log") view.innerHTML = logHTML();
+  else if(ACTIVE_TAB === "log") view.innerHTML = isAdmin ? logHTML() : restricted;
   attachViewHandlers();
 }
 
